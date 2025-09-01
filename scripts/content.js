@@ -88,9 +88,8 @@ function createFormulaButton() {
     debuggerDiv.id = 'formulaDebugger';
     debuggerDiv.style.cssText = 'margin-top: 10px; padding: 10px; border: 1px solid #ccc; background: #f9f9f9; font-family: Arial, sans-serif;';
     debuggerDiv.innerHTML = `
-        <h3 style="margin: 0 0 10px 0;">Formula Debugger</h3>
+        <button id="runDebug" type="button" style="padding: 5px 10px;">Run Formula Debugger</button>
         <div id="debugOutput">Debug output will appear here once implemented.</div>
-        <button id="runDebug" type="button" style="margin-top: 10px; padding: 5px 10px;">Run Debug</button>
     `;
     formulaTextarea.parentNode.insertBefore(debuggerDiv, formulaTextarea.nextSibling);
 
