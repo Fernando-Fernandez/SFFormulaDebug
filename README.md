@@ -1,4 +1,4 @@
-*Formula Debugger for Salesforce (Chrome Extension)*
+***Formula Debugger for Salesforce (Chrome Extension)***
 
 **Overview**
 - **Goal:** Inspect, test, and debug Salesforce formulas directly in the Lightning formula editor.
