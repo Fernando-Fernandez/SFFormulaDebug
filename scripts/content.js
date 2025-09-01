@@ -1,0 +1,878 @@
+function urlMatchesFormulaEditor() {
+    return window.location.href.includes('/e?');
+}
+
+// Initialize content script when iframe is loaded
+if (urlMatchesFormulaEditor()) {
+
+    // Check if we're in the main frame or iframe
+    if (window === window.top) {
+        // Main frame - wait for iframe and element
+        waitForIframeAndElement();
+    } else {
+        // We're in an iframe - check for the element directly
+        waitForElement('CalculatedFormula', createFormulaButton);
+    }
+}
+
+function waitForElement(elementId, callback) {
+    const element = document.getElementById(elementId);
+    if (element) {
+        callback();
+        return;
+    }
+
+    const observer = new MutationObserver((mutations, obs) => {
+        const element = document.getElementById(elementId);
+        if (element) {
+            obs.disconnect();
+            callback();
+        }
+    });
+
+    observer.observe(document, {
+        childList: true,
+        subtree: true
+    });
+}
+
+function waitForIframeAndElement() {
+    const checkForElement = () => {
+        // Check in main document first
+        let element = document.getElementById('CalculatedFormula');
+        if (element) {
+            createFormulaButton();
+            return;
+        }
+        
+        // Check in iframes
+        const iframes = document.getElementsByTagName('iframe');
+        for (let iframe of iframes) {
+            if( iframe.src === '' || iframe.src.includes('chrome-extension:') ) {
+                continue;
+            }
+            try {
+                const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
+                element = iframeDoc.getElementById('CalculatedFormula');
+                if (element) {
+                    injectDebuggerUI(iframeDoc);
+                    return;
+                }
+            } catch (e) {
+                // Cross-origin iframe - can't access
+                console.log('Cannot access iframe:', e);
+            }
+        }
+        
+        // Retry if not found
+        setTimeout(checkForElement, 500);
+    };
+    
+    checkForElement();
+}
+
+function createFormulaButton() {
+    let doc = window.document;
+    let formulaTextarea = doc.getElementById('CalculatedFormula');
+    if (!formulaTextarea) {
+        console.log('Could not find formula textarea after multiple attempts.');
+        return;
+    }
+    
+    if (doc.getElementById('formulaDebugger')) {
+        console.log('Formula Debugger already set up.');
+        return;
+    }
+
+    let debuggerDiv = doc.createElement('div');
+    debuggerDiv.id = 'formulaDebugger';
+    debuggerDiv.style.cssText = 'margin-top: 10px; padding: 10px; border: 1px solid #ccc; background: #f9f9f9; font-family: Arial, sans-serif;';
+    debuggerDiv.innerHTML = `
+        <h3 style="margin: 0 0 10px 0;">Formula Debugger</h3>
+        <div id="debugOutput">Debug output will appear here once implemented.</div>
+        <button id="runDebug" type="button" style="margin-top: 10px; padding: 5px 10px;">Run Debug</button>
+    `;
+    formulaTextarea.parentNode.insertBefore(debuggerDiv, formulaTextarea.nextSibling);
+
+    // Add event listener for debug button
+    doc.getElementById('runDebug').addEventListener('click', runDebug);
+}
+
+function runDebug() {
+    let doc = window.document;
+    let formula = extractFormulaContent(doc);
+    let debugOutput = doc.getElementById('debugOutput');
+    if(!debugOutput) {
+        console.error('Debug output element not found.');
+        return;
+    }
+
+    try {
+        if (!formula || formula.trim() === '') {
+            debugOutput.innerText = 'No formula to analyze';
+            return;
+        }
+
+        const parser = new Parser();
+        const ast = parser.parse(formula.trim());
+        
+        displayDataStructure(ast, doc);
+        
+    } catch (error) {
+        debugOutput.innerHTML = `<div style="color: red; padding: 10px; background: #ffe8e8; border: 1px solid #f44336; border-radius: 4px;">
+            <strong>Formula Analysis Error:</strong><br>${error.message}
+        </div>`;
+    }
+}
+
+function extractFormulaContent(doc) {
+    let formulaTextarea = doc.getElementById('CalculatedFormula');
+    return formulaTextarea ? formulaTextarea.value || 'No formula content found.' : 'Formula editor not found.';
+}
+
+const TOKEN_PATTERNS = [
+    [ /^\s+/, 'WHITESPACE' ],
+    [ /^"[^"]*"/, 'DOUBLE_QUOTE_STRING' ],
+    [ /^\d+/, 'NUMBER' ],
+    [ /^'[^']*'/, 'STRING' ],
+    [ /^\/\/.*/, 'SINGLE_LINE_COMMENT' ],
+    [ /^\/\*[\s\S]*?\*\//, 'MULTI_LINE_COMMENT' ],
+    [ /^[+\-]/, 'ADDITIVE_OPERATOR' ],
+    [ /^[*\/]/, 'MULTIPLICATIVE_OPERATOR' ],
+    [ /^[()]/, 'PARENTHESIS' ],
+    [ /^[{}]/, 'BRACES' ],
+    [ /^,/, 'COMMA' ],
+    [ /^&&/, 'AND' ],
+    [ /^\|\|/, 'OR' ],
+    [ /^=/, 'EQUAL' ],
+    [ /^!=/, 'NOT_EQUAL' ],
+    [ /^<>/, 'NOT_EQUAL' ],
+    [ /^<=/, 'LESS_THAN_OR_EQUAL' ],
+    [ /^>=/, 'GREATER_THAN_OR_EQUAL' ],
+    [ /^</, 'LESS_THAN' ],
+    [ /^>/, 'GREATER_THAN' ],
+    [ /^NULL\b/i, 'NULL' ],
+    [ /^[a-zA-Z_]\w*/, 'IDENTIFIER' ]
+];
+
+class Tokenizer {
+    initialize(inputString) {
+        this._expression = inputString;
+        this._currentPos = 0;
+        this._parenStack = [];
+    }
+
+    hasMoreTokens() {
+        return this._currentPos < this._expression.length;
+    }
+
+    getNextToken() {
+        if (!this.hasMoreTokens()) {
+            return null;
+        }
+
+        const remainingPart = this._expression.slice(this._currentPos);
+
+        for (const [regExpression, tokenType] of TOKEN_PATTERNS) {
+            const token = this.findMatch(regExpression, remainingPart);
+            if (token != null) {
+                const tokenStartPos = this._currentPos;
+                this._currentPos += token.length;
+
+                if (token === '(') {
+                    this._parenStack.push(tokenStartPos);
+                } else if (token === ')') {
+                    if (this._parenStack.length === 0) {
+                        const expressionSnippet = this._expression.slice(Math.max(0, tokenStartPos - 10), tokenStartPos + 10);
+                        throw new Error(`Unexpected closing parenthesis at position ${tokenStartPos + 1}: ')' ` 
+                                        + `without matching '('. Near: '${expressionSnippet}'`);
+                    }
+                    this._parenStack.pop();
+                }
+
+                return { tokenType, token };
+            }
+        }
+
+        const pos = this._currentPos + 1;
+        const expressionSnippet = this._expression.slice(Math.max(0, pos - 10), pos + 10);
+        throw new Error(`Unexpected character at position ${pos}: '${remainingPart[0]}'. Near: '${expressionSnippet}'`);
+    }
+
+    findMatch(regExpression, remainingPart) {
+        const theMatch = remainingPart.match(regExpression);
+        if (!theMatch) {
+            return null;
+        }
+        return theMatch[0];
+    }
+
+    checkParenthesesBalance() {
+        if (this._parenStack.length > 0) {
+            const lastOpenPos = this._parenStack[this._parenStack.length - 1] + 1;
+            const expressionSnippet = this._expression.slice(Math.max(0, lastOpenPos - 10), lastOpenPos + 10);
+            throw new Error(`Missing closing parenthesis for opening parenthesis at position ${lastOpenPos}. `
+                            + `Near: '${expressionSnippet}'`);
+        }
+    }
+}
+
+class Parser {
+    constructor() {
+        this._string = '';
+        this._tokenizer = new Tokenizer();
+        this._tokens = [];
+        this._currentIndex = 0;
+    }
+
+    parse(string) {
+        this._string = string;
+        this._tokenizer.initialize(this._string);
+        this._tokens = [];
+        this._currentIndex = 0;
+
+        while (this._tokenizer.hasMoreTokens()) {
+            const token = this._tokenizer.getNextToken();
+            if (token && token.tokenType !== 'WHITESPACE' && 
+                token.tokenType !== 'SINGLE_LINE_COMMENT' && 
+                token.tokenType !== 'MULTI_LINE_COMMENT') {
+                this._tokens.push(token);
+            }
+        }
+
+        this._tokenizer.checkParenthesesBalance();
+
+        return this.parseExpression();
+    }
+
+    peek() {
+        return this._currentIndex < this._tokens.length ? this._tokens[this._currentIndex] : null;
+    }
+
+    consume(expectedType = null) {
+        const token = this.peek();
+        if (!token) {
+            throw new Error('Unexpected end of input');
+        }
+        if (expectedType && token.tokenType !== expectedType) {
+            throw new Error(`Expected ${expectedType} at ${this._currentIndex}, got ${token.tokenType}`);
+        }
+        this._currentIndex++;
+        return token;
+    }
+
+    parseExpression() {
+        let node = this.parseEquality();
+        while (this.peek() && (this.peek().token === '&&' || this.peek().token === '||')) {
+            const operator = this.consume().token;
+            const right = this.parseEquality();
+            node = { type: 'Operator', operator, left: node, right };
+        }
+        return node;
+    }
+
+    parseEquality() {
+        let node = this.parseTerm();
+        while (this.peek() && (
+            this.peek().token === '=' ||
+            this.peek().token === '!=' ||
+            this.peek().token === '<>' ||
+            this.peek().token === '<' ||
+            this.peek().token === '>' ||
+            this.peek().token === '<=' ||
+            this.peek().token === '>='
+        )) {
+            const operator = this.consume().token;
+            const right = this.parseTerm();
+            node = { type: 'Operator', operator, left: node, right };
+        }
+        return node;
+    }
+
+    parseTerm() {
+        let node = this.parseFactor();
+        while (this.peek() && (this.peek().token === '+' || this.peek().token === '-')) {
+            const operator = this.consume().token;
+            const right = this.parseFactor();
+            node = { type: 'Operator', operator, left: node, right };
+        }
+        return node;
+    }
+
+    parseFactor() {
+        let node = this.parsePrimary();
+        while (this.peek() && (this.peek().token === '*' || this.peek().token === '/')) {
+            const operator = this.consume().token;
+            const right = this.parsePrimary();
+            node = { type: 'Operator', operator, left: node, right };
+        }
+        return node;
+    }
+
+    parsePrimary() {
+        const token = this.peek();
+        if (!token) {
+            throw new Error('Unexpected end of input');
+        }
+
+        if (token.tokenType === 'NUMBER') {
+            return { type: 'Literal', value: parseFloat(this.consume().token) };
+        } else if (token.tokenType === 'STRING' || token.tokenType === 'DOUBLE_QUOTE_STRING') {
+            return { type: 'Literal', value: this.consume().token.slice(1, -1) };
+        } else if (token.tokenType === 'NULL') {
+            this.consume();
+            return { type: 'Literal', value: null };
+        } else if (token.tokenType === 'IDENTIFIER') {
+            const name = this.consume().token;
+            if (this.peek() && this.peek().token === '(') {
+                this.consume('PARENTHESIS');
+                const args = [];
+                while (this.peek() && this.peek().token !== ')') {
+                    args.push(this.parseExpression());
+                    if (this.peek() && this.peek().token === ',') {
+                        this.consume('COMMA');
+                    } else {
+                        break;
+                    }
+                }
+                this.consume('PARENTHESIS');
+                return { type: 'Function', name, arguments: args };
+            } else {
+                return { type: 'Field', name };
+            }
+        } else if (token.token === '(') {
+            this.consume('PARENTHESIS');
+            const expr = this.parseExpression();
+            this.consume('PARENTHESIS');
+            return expr;
+        } else {
+            throw new Error(`Unexpected token: ${token.token}`);
+        }
+    }
+}
+
+function extractVariables(ast) {
+    const variables = new Set();
+
+    function traverse(node) {
+        if (!node) return;
+
+        switch (node.type) {
+            case "Field":
+                variables.add(node.name);
+                break;
+            case "Function":
+                // Special handling for NOW() - treat it as a testable variable
+                if (node.name.toUpperCase() === "NOW") {
+                    variables.add("NOW()");
+                }
+                node.arguments.forEach(arg => traverse(arg));
+                break;
+            case "Operator":
+                traverse(node.left);
+                traverse(node.right);
+                break;
+            case "Literal":
+                break;
+            default:
+                throw new Error(`Unknown AST node type: ${node.type}`);
+        }
+    }
+
+    traverse(ast);
+    return Array.from(variables);
+}
+
+function rebuildFormula(ast) {
+    if (!ast || !ast.type) return "";
+
+    switch (ast.type) {
+        case "Function":
+            const args = ast.arguments.map(arg => rebuildFormula(arg)).join(", ");
+            return `${ast.name}(${args})`;
+        case "Operator":
+            const left = rebuildFormula(ast.left);
+            const right = rebuildFormula(ast.right);
+            return `${left} ${ast.operator} ${right}`;
+        case "Field":
+            return ast.name;
+        case "Literal":
+            if (ast.value === null) {
+                return "null";
+            }
+            if (typeof ast.value === "string") {
+                return `"${ast.value}"`;
+            }
+            return ast.value.toString();
+        default:
+            throw new Error(`Unknown AST node type: ${ast.type}`);
+    }
+}
+
+function extractCalculationSteps(ast) {
+    const steps = [];
+    const seen = new Set();
+
+    function traverse(node) {
+        if (!node) return;
+
+        switch (node.type) {
+            case "Function":
+                node.arguments.forEach(arg => traverse(arg));
+                const expr = rebuildFormula(node);
+                if (!seen.has(expr)) {
+                    seen.add(expr);
+                    steps.push({ expression: expr, node });
+                }
+                break;
+            case "Operator":
+                traverse(node.left);
+                traverse(node.right);
+                const opExpr = rebuildFormula(node);
+                if (!seen.has(opExpr)) {
+                    seen.add(opExpr);
+                    steps.push({ expression: opExpr, node });
+                }
+                break;
+            case "Field":
+            case "Literal":
+                break;
+            default:
+                throw new Error(`Unknown AST node type: ${node.type}`);
+        }
+    }
+
+    traverse(ast);
+    return steps;
+}
+
+function isDate(value) {
+    return value instanceof Date;
+}
+
+function isDateString(value) {
+    if (typeof value !== 'string' || value.trim() === '') return false;
+    const date = new Date(value);
+    return !isNaN(date.getTime());
+}
+
+function toDate(value) {
+    if (isDate(value)) return value;
+    if (isDateString(value)) return new Date(value);
+    return null;
+}
+
+function toNumber(value) {
+    if (typeof value === 'number') return value;
+    if (isDate(value)) return value.getTime();
+    const num = parseFloat(value);
+    return isNaN(num) ? 0 : num;
+}
+
+function calculateFormula(ast, variables = {}) {
+    if (!ast) return null;
+
+    switch (ast.type) {
+        case "Function":
+            const args = ast.arguments.map(arg => calculateFormula(arg, variables));
+            switch (ast.name.toUpperCase()) {
+                case "IF": return args[0] ? args[1] : args[2];
+                case "CONTAINS":
+                    const text = String(args[0] || "");
+                    const substring = String(args[1] || "");
+                    return text.includes(substring);
+                case "FIND":
+                    const findText = String(args[1] || "");
+                    const findSubstring = String(args[0] || "");
+                    const startPos = args[2] ? parseInt(args[2]) - 1 : 0;
+                    const pos = findText.indexOf(findSubstring, startPos);
+                    return pos === -1 ? 0 : pos + 1;
+                case "MID":
+                    const midText = String(args[0] || "");
+                    const start = parseInt(args[1] || 1) - 1;
+                    const length = parseInt(args[2] || 0);
+                    return midText.substr(start, length);
+                case "FLOOR":
+                    if (args.length !== 1) 
+                        throw new Error("FLOOR requires exactly one argument");
+                    const number = parseFloat(args[0]);
+                    if (isNaN(number)) 
+                        throw new Error("FLOOR argument must be numeric");
+                    return Math.floor(number);
+                case "CASE":
+                    if (args.length < 4 || args.length % 2 === 1) {
+                        throw new Error("CASE requires an expression, at least one value-result pair, "
+                                        + "and a default value (even number of arguments)");
+                    }
+                    const expressionValue = args[0];
+                    for (let i = 1; i < args.length - 1; i += 2) {
+                        if (expressionValue === args[i]) {
+                            return args[i + 1];
+                        }
+                    }
+                    return args[args.length - 1];
+                case "AND":
+                    if (args.length === 0) {
+                        throw new Error("AND requires at least one argument");
+                    }
+                    return args.every(arg => Boolean(arg));
+                case "OR":
+                    if (args.length === 0) {
+                        throw new Error("OR requires at least one argument");
+                    }
+                    return args.some(arg => Boolean(arg));
+                case "NOT":
+                    if (args.length !== 1) {
+                        throw new Error("NOT requires exactly one argument");
+                    }
+                    return !Boolean(args[0]);
+                case "ISPICKVAL":
+                    if (args.length !== 2) {
+                        throw new Error("ISPICKVAL requires exactly two arguments: field and value");
+                    }
+                    const fieldValue = String(args[0] || "");
+                    const picklistValue = String(args[1] || "");
+                    return fieldValue === picklistValue;
+                case "ISBLANK":
+                    if (args.length !== 1) {
+                        throw new Error("ISBLANK requires exactly one argument");
+                    }
+                    const value = args[0];
+                    if (value === null || value === undefined) {
+                        return true;
+                    }
+                    const stringValue = String(value).trim();
+                    return stringValue === "";
+                case "NOW":
+                    if (args.length !== 0) {
+                        throw new Error("NOW requires no arguments");
+                    }
+                    // For testing purposes, check if there's a test value provided
+                    if (variables && variables['NOW()'] !== undefined) {
+                        const testValue = variables['NOW()'];
+                        if (testValue === '') {
+                            return new Date();
+                        }
+                        const parsedDate = new Date(testValue);
+                        if (isNaN(parsedDate.getTime())) {
+                            throw new Error("Invalid date format for NOW() test value");
+                        }
+                        return parsedDate;
+                    }
+                    return new Date();
+                default: throw new Error(`Unsupported function: ${ast.name}`);
+            }
+
+        case "Operator":
+            const left = calculateFormula(ast.left, variables);
+            const right = calculateFormula(ast.right, variables);
+            
+            const leftDate = toDate(left);
+            const rightDate = toDate(right);
+            
+            switch (ast.operator) {
+                case "+":
+                    // String concatenation
+                    if (typeof left === "string" || typeof right === "string") {
+                        return String(left) + String(right);
+                    }
+                    // Date + number (add days)
+                    if (leftDate && typeof right === "number") {
+                        return new Date(leftDate.getTime() + (right * 24 * 60 * 60 * 1000));
+                    }
+                    if (typeof left === "number" && rightDate) {
+                        return new Date(rightDate.getTime() + (left * 24 * 60 * 60 * 1000));
+                    }
+                    // Number arithmetic
+                    return (parseFloat(left) || 0) + (parseFloat(right) || 0);
+                
+                case "-":
+                    // Date - Date = difference in days
+                    if (leftDate && rightDate) {
+                        const diffMs = leftDate.getTime() - rightDate.getTime();
+                        return diffMs / (1000 * 60 * 60 * 24); // Convert to days
+                    }
+                    // Date - number (subtract days)
+                    if (leftDate && typeof right === "number") {
+                        return new Date(leftDate.getTime() - (right * 24 * 60 * 60 * 1000));
+                    }
+                    // Number arithmetic
+                    return (parseFloat(left) || 0) - (parseFloat(right) || 0);
+                
+                case "*": return (parseFloat(left) || 0) * (parseFloat(right) || 0);
+                case "/":
+                    const divisor = parseFloat(right) || 0;
+                    if (divisor === 0) throw new Error("Division by zero");
+                    return (parseFloat(left) || 0) / divisor;
+                case "&&": return Boolean(left) && Boolean(right);
+                case "||": return Boolean(left) || Boolean(right);
+                case "=": 
+                    // Date comparison
+                    if (leftDate && rightDate) {
+                        return leftDate.getTime() === rightDate.getTime();
+                    }
+                    return left === right;
+                case "<>": 
+                case "!=": 
+                    // Date comparison
+                    if (leftDate && rightDate) {
+                        return leftDate.getTime() !== rightDate.getTime();
+                    }
+                    return left !== right;
+                case "<": 
+                    // Date comparison
+                    if (leftDate && rightDate) {
+                        return leftDate.getTime() < rightDate.getTime();
+                    }
+                    return (parseFloat(left) || 0) < (parseFloat(right) || 0);
+                case ">": 
+                    // Date comparison
+                    if (leftDate && rightDate) {
+                        return leftDate.getTime() > rightDate.getTime();
+                    }
+                    return (parseFloat(left) || 0) > (parseFloat(right) || 0);
+                case "<=": 
+                    // Date comparison
+                    if (leftDate && rightDate) {
+                        return leftDate.getTime() <= rightDate.getTime();
+                    }
+                    return (parseFloat(left) || 0) <= (parseFloat(right) || 0);
+                case ">=": 
+                    // Date comparison
+                    if (leftDate && rightDate) {
+                        return leftDate.getTime() >= rightDate.getTime();
+                    }
+                    return (parseFloat(left) || 0) >= (parseFloat(right) || 0);
+                default: throw new Error(`Unsupported operator: ${ast.operator}`);
+            }
+
+        case "Field":
+            const fieldValue = variables[ast.name] !== undefined ? variables[ast.name] : "";
+            // Try to parse as date if it looks like a date string
+            if (typeof fieldValue === 'string' && fieldValue.trim() !== '') {
+                const dateValue = toDate(fieldValue);
+                if (dateValue) return dateValue;
+            }
+            return fieldValue;
+
+        case "Literal":
+            return ast.value;
+
+        default:
+            throw new Error(`Unknown AST node type: ${ast.type}`);
+    }
+}
+
+function getVariableValues(ast, doc) {
+    const variables = extractVariables(ast);
+    const values = {};
+    variables.forEach(variable => {
+        const input = doc.getElementById(`var-${variable}`);
+        values[variable] = input ? (input.value || "") : "";
+    });
+    return values;
+}
+
+function displayDataStructure(ast, doc) {
+    const debugOutput = doc.getElementById('debugOutput');
+    if (!debugOutput) return;
+
+    const variables = extractVariables(ast);
+    // const rebuiltFormula = rebuildFormula(ast);
+    const steps = extractCalculationSteps(ast);
+    
+    debugOutput.innerHTML = '';
+    
+    const container = doc.createElement('div');
+    container.style.cssText = 'font-family: Arial, sans-serif;';
+    
+    // const rebuiltDiv = doc.createElement('div');
+    // rebuiltDiv.style.cssText = 'margin-bottom: 15px; padding: 10px; background: #f0f0f0; border-radius: 4px;';
+    // rebuiltDiv.innerHTML = `<strong>Rebuilt Formula:</strong><br><code>${rebuiltFormula}</code>`;
+    //container.appendChild(rebuiltDiv);
+    
+    if (variables.length > 0) {
+        const varsDiv = doc.createElement('div');
+        varsDiv.style.cssText = 'margin-bottom: 15px;';
+        varsDiv.innerHTML = '<strong>Field Values</strong>';
+        
+        const varsList = doc.createElement('div');
+        varsList.style.cssText = 'margin-top: 10px;';
+        
+        variables.forEach(variable => {
+            const fieldDiv = doc.createElement('div');
+            fieldDiv.style.cssText = 'margin: 5px 0; display: flex; align-items: center;';
+            
+            const label = doc.createElement('span');
+            label.textContent = `${variable}: `;
+            label.style.cssText = 'display: inline-block; width: 120px; font-weight: bold;';
+            
+            const input = doc.createElement('input');
+            input.id = `var-${variable}`;
+            input.style.cssText = 'flex: 1; padding: 4px 8px; border: 1px solid #ccc; border-radius: 3px;';
+            
+            // Special handling for NOW() function
+            if (variable === 'NOW()') {
+                input.type = 'datetime-local';
+                input.placeholder = 'Select date/time for testing';
+                // Set default to current date/time in local datetime format
+                const now = new Date();
+                const localDateTime = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
+                input.value = localDateTime.toISOString().slice(0, 16);
+            } else {
+                input.type = 'text';
+                input.placeholder = `Enter value for ${variable}`;
+            }
+            
+            fieldDiv.appendChild(label);
+            fieldDiv.appendChild(input);
+            
+            // Add helper text for NOW() after the input
+            if (variable === 'NOW()') {
+                const helperText = doc.createElement('div');
+                helperText.style.cssText = 'font-size: 11px; color: #666; margin-top: 2px; margin-left: 120px;';
+                helperText.textContent = 'Leave empty to use current date/time';
+                fieldDiv.appendChild(helperText);
+            }
+            
+            varsList.appendChild(fieldDiv);
+        });
+        
+        varsDiv.appendChild(varsList);
+        container.appendChild(varsDiv);
+        
+        const calculateBtn = doc.createElement('button');
+        calculateBtn.textContent = 'Calculate Formula';
+        calculateBtn.type = 'button';
+        calculateBtn.style.cssText = 'padding: 8px 16px; background: #007cba; color: white; border: none; border-radius: 4px; cursor: pointer; margin-bottom: 15px;';
+        calculateBtn.addEventListener('click', () => calculateAndDisplay(ast, doc));
+        container.appendChild(calculateBtn);
+        
+        const resultDiv = doc.createElement('div');
+        resultDiv.id = 'calculationResult';
+        resultDiv.style.cssText = 'margin: 10px 0; padding: 10px; background: #e8f5e8; border: 1px solid #4caf50; border-radius: 4px; display: none;';
+        container.appendChild(resultDiv);
+    }
+    
+    if (steps.length > 0) {
+        const stepsDiv = doc.createElement('div');
+        stepsDiv.innerHTML = `<strong>Calculation Steps (${steps.length}):</strong>`;
+        stepsDiv.style.cssText = 'margin-bottom: 10px;';
+        
+        const stepsList = doc.createElement('div');
+        stepsList.id = 'stepsList';
+        stepsList.style.cssText = 'margin-top: 10px;';
+        
+        steps.forEach((step, index) => {
+            const stepDiv = doc.createElement('div');
+            stepDiv.style.cssText = 'margin: 5px 0; padding: 8px; background: #f9f9f9; border-left: 3px solid #007cba; font-family: monospace;';
+            stepDiv.textContent = `${index + 1}. ${step.expression}`;
+            stepsList.appendChild(stepDiv);
+        });
+        
+        stepsDiv.appendChild(stepsList);
+        container.appendChild(stepsDiv);
+    }
+    
+    debugOutput.appendChild(container);
+}
+
+function calculateAndDisplay(ast, doc) {
+    const resultDiv = doc.getElementById('calculationResult');
+    if (!resultDiv) return;
+    
+    try {
+        const variables = getVariableValues(ast, doc);
+        const result = calculateFormula(ast, variables);
+        
+        const displayResult = result === null ? 'null' : 
+                             isDate(result) ? result.toLocaleString() : 
+                             typeof result === 'number' && result % 1 !== 0 ? result.toFixed(6) : result;
+        resultDiv.innerHTML = `<strong>Result:</strong> ${displayResult}`;
+        resultDiv.style.display = 'block';
+        resultDiv.style.background = '#e8f5e8';
+        resultDiv.style.borderColor = '#4caf50';
+        
+        updateStepsWithCalculation(ast, variables, doc);
+        
+    } catch (error) {
+        resultDiv.innerHTML = `<strong>Error:</strong> ${error.message}`;
+        resultDiv.style.display = 'block';
+        resultDiv.style.background = '#ffe8e8';
+        resultDiv.style.borderColor = '#f44336';
+    }
+}
+
+function updateStepsWithCalculation(ast, variables, doc) {
+    const stepsList = doc.getElementById('stepsList');
+    if (!stepsList) return;
+    
+    const steps = extractCalculationSteps(ast);
+    stepsList.innerHTML = '';
+    
+    steps.forEach((step, index) => {
+        const stepDiv = doc.createElement('div');
+        stepDiv.style.cssText = 'margin: 5px 0; padding: 8px; background: #f9f9f9; border-left: 3px solid #007cba;';
+        
+        const exprDiv = doc.createElement('div');
+        exprDiv.style.cssText = 'font-family: monospace; font-weight: bold;';
+        exprDiv.textContent = `${index + 1}. ${step.expression}`;
+        
+        let result;
+        try {
+            result = calculateFormula(step.node, variables);
+        } catch (error) {
+            result = `Error: ${error.message}`;
+        }
+        
+        const displayResult = result === null ? 'null' : 
+                             isDate(result) ? result.toLocaleString() : 
+                             typeof result === 'number' && result % 1 !== 0 ? result.toFixed(6) : result;
+        const resultSpan = doc.createElement('div');
+        resultSpan.style.cssText = 'font-family: monospace; color: #007cba; margin-top: 4px;';
+        resultSpan.textContent = `= ${displayResult}`;
+        
+        stepDiv.appendChild(exprDiv);
+        stepDiv.appendChild(resultSpan);
+        stepsList.appendChild(stepDiv);
+    });
+}
+
+function analyzeFormula(formula) {
+    try {
+        if (!formula || formula.trim() === '') {
+            return 'No formula to analyze';
+        }
+
+        const parser = new Parser();
+        const ast = parser.parse(formula.trim());
+        
+        const variables = extractVariables(ast);
+        const rebuiltFormula = rebuildFormula(ast);
+        const steps = extractCalculationSteps(ast);
+        
+        let result = `Formula Analysis:\n\n`;
+        result += `Original: ${formula}\n`;
+        result += `Rebuilt: ${rebuiltFormula}\n\n`;
+        
+        if (variables.length > 0) {
+            result += `Variables found: ${variables.join(', ')}\n\n`;
+        } else {
+            result += `No variables found\n\n`;
+        }
+        
+        if (steps.length > 0) {
+            result += `Calculation steps (${steps.length}):\n`;
+            steps.forEach((step, index) => {
+                result += `${index + 1}. ${step.expression}\n`;
+            });
+        } else {
+            result += `No calculation steps found\n`;
+        }
+        
+        return result;
+        
+    } catch (error) {
+        return `Formula Analysis Error:\n${error.message}`;
+    }
+}
