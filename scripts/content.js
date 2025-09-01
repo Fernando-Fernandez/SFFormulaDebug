@@ -776,7 +776,19 @@ function displayDataStructure(ast, doc) {
     debugOutput.appendChild(container);
 }
 
+function createAnonymousApexFormula() {
+    // FormulaEval.FormulaBuilder builder = Formula.builder(); 
+    // FormulaEval.FormulaInstance ff = builder
+    //     .withFormula('1+2')
+    //     .withType(Account.class)
+    //     .withReturnType(FormulaEval.FormulaReturnType.Decimal)
+    //     .build();
+    // system.debug( ff.evaluate(new Account()) );
+}
+
 function calculateAndDisplay(ast, doc) {
+    let anonymousApex = "System.debug( 1 + 2 );";
+    calculateFormulaViaAnonymousApex( anonymousApex );
     const resultDiv = doc.getElementById('calculationResult');
     if (!resultDiv) return;
     
@@ -873,5 +885,102 @@ function analyzeFormula(formula) {
         
     } catch (error) {
         return `Formula Analysis Error:\n${error.message}`;
+    }
+}
+
+const GETHOSTANDSESSION = "getHostSession";
+const TOOLING_API_VERSION = 'v57.0';
+
+function calculateFormulaViaAnonymousApex( anonymousApex ) {
+    // get host and session from background script
+    let getHostMessage = { message: GETHOSTANDSESSION
+        , url: location.href 
+    };
+    chrome.runtime.sendMessage( getHostMessage, resultData => {
+        //console.log( resultData );
+        sfHost = resultData.domain;
+        sessionId = resultData.session;
+
+        // now that host and session are available, run the tooling API call to execute anonymous apex
+        runApexToolingAPI( sfHost, sessionId, anonymousApex );
+    } );
+}
+
+function runApexToolingAPI( host, sessionId, anonymousApex ) {
+    let encodedApex = encodeURI( anonymousApex ).replaceAll('(', '%28').replaceAll(')', '%29')
+                        .replaceAll(';', '%3B').replaceAll('+', '%2B');
+    let endpoint = "https://" + host +  "/services/data/" + TOOLING_API_VERSION + "/tooling/executeAnonymous/?anonymousBody=" + encodedApex;
+    let request = {
+        method: "GET"
+        , headers: {
+          "Content-Type": "application/json"
+          , "Authorization": "Bearer " + sessionId
+        }
+    };
+    let response = fetch( endpoint, request )
+                    .then( ( response ) => response.json() )
+                    .then( ( data ) => {
+                        if( Array.isArray( data ) && data[0].errorCode ) {
+                            console.error( "Could not execute Anonymous Apex: " + data[0].message );
+                            return;
+                        }
+                        if( !data.success ) {
+                            console.error( "Apex execution failed: " + data.compileProblem );
+                            console.error( "Apex execution stack: " + data.exceptionStackTrace );
+                            console.error( "Apex execution exception: " + data.exceptionMessage );
+                            return;
+                        }
+                        retrieveDebugLogId( host, sessionId );
+                    } );
+}
+
+function retrieveDebugLogId( host, sessionId ) {
+    let endpoint = "https://" + host +  "/services/data/" + TOOLING_API_VERSION + "/tooling/query/?q=SELECT Id FROM ApexLog ORDER BY StartTime DESC LIMIT 1";
+    let request = {
+        method: "GET"
+        , headers: {
+          "Content-Type": "application/json"
+          , "Authorization": "Bearer " + sessionId
+        }
+    };
+    let response = fetch( endpoint, request )
+                    .then( ( response ) => response.json() )
+                    .then( ( data ) => {
+                        if( Array.isArray( data ) && data[0].errorCode ) {
+                            console.error( "Could not find Apex Log: " + data[0].message );
+                            return;
+                        }
+                        if( !data.records || data.records.length == 0 ) {
+                            console.error( "No Apex logs found" );
+                            return;
+                        }
+                        const apexLogId = data.records[0].Id
+                        retrieveDebugLogBody( host, sessionId, apexLogId );
+                    } );
+}
+
+function retrieveDebugLogBody( host, sessionId, apexLogId ) {
+    let endpoint = "https://" + host +  "/services/data/" + TOOLING_API_VERSION + "/tooling/sobjects/ApexLog/" + apexLogId + "/Body";
+    let request = {
+        method: "GET"
+        , headers: {
+          "Content-Type": "application/json"
+          , "Authorization": "Bearer " + sessionId
+        }
+    };
+    
+    let response = fetch( endpoint, request )
+                    .then( async ( response ) => {
+                        const apexLog = await response.text();
+                        parseApexLog( apexLog );
+                    } );
+}
+
+function parseApexLog( apexLog ) {
+    const logLines = apexLog.split( '\n' );
+    for( let line of logLines ) {
+        if( line.includes( 'USER_DEBUG' ) ) {
+            console.log( "Formula Debug: " + line );
+        }
     }
 }
