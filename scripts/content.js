@@ -1151,7 +1151,8 @@ function createAnonymousApexForNode(node, astRoot, doc) {
         if (/^(true|false)$/i.test(s)) return s.toLowerCase();
         const n = Number(s);
         if (!isNaN(n) && isFinite(n)) return String(n);
-        const isDateOnly = /^\d{4}-\d{2}-\d{2}$/.test(s);
+        // const isDateOnly = /^\d{4}-\d{2}-\d{2}$/.test(s);
+        const isDateOnly = /^\d{2}\/\d{2}\/\d{4}$/.test(s);
         const maybeDate = toDate(s);
         if (maybeDate) {
             const y = maybeDate.getUTCFullYear();
@@ -1292,9 +1293,6 @@ function buildAnonymousApexForSteps(steps, astRoot, doc, runId) {
 }
 
 async function calculateAndDisplay(ast, doc) {
-    // let anonymousApex = createAnonymousApexFormula();
-    // await calculateFormulaViaAnonymousApex( anonymousApex );
-
     const resultDiv = doc.getElementById('calculationResult');
     if (!resultDiv) return;
     
@@ -1384,44 +1382,6 @@ async function updateStepsWithCalculation(ast, variables, doc) {
     }
 }
 
-// function analyzeFormula(formula) {
-//     try {
-//         if (!formula || formula.trim() === '') {
-//             return 'No formula to analyze';
-//         }
-
-//         const parser = new Parser();
-//         const ast = parser.parse(formula.trim());
-        
-//         const variables = extractVariables(ast);
-//         const rebuiltFormula = rebuildFormula(ast);
-//         const steps = extractCalculationSteps(ast);
-        
-//         let result = `Formula Analysis:\n\n`;
-//         result += `Original: ${formula}\n`;
-//         result += `Rebuilt: ${rebuiltFormula}\n\n`;
-        
-//         if (variables.length > 0) {
-//             result += `Variables found: ${variables.join(', ')}\n\n`;
-//         } else {
-//             result += `No variables found\n\n`;
-//         }
-        
-//         if (steps.length > 0) {
-//             result += `Calculation steps (${steps.length}):\n`;
-//             steps.forEach((step, index) => {
-//                 result += `${index + 1}. ${step.expression}\n`;
-//             });
-//         } else {
-//             result += `No calculation steps found\n`;
-//         }
-        
-//         return result;
-        
-//     } catch (error) {
-//         return `Formula Analysis Error:\n${error.message}`;
-//     }
-// }
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
