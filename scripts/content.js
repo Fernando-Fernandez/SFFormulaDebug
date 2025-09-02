@@ -5,8 +5,8 @@ function urlMatchesFormulaEditor() {
     return window.location.href.includes('/e?');
 }
 
-// Initialize content script when iframe is loaded
-if (urlMatchesFormulaEditor()) {
+// Initialize content script when iframe is loaded (guarded for Node tests)
+if (typeof window !== 'undefined' && urlMatchesFormulaEditor()) {
 
     // Check if we're in the main frame or iframe
     if (window === window.top) {
@@ -17,6 +17,8 @@ if (urlMatchesFormulaEditor()) {
         waitForElement('CalculatedFormula', createFormulaButton);
     }
 }
+
+// (module.exports assigned at end of file after class declarations)
 
 function waitForElement(elementId, callback) {
     const element = document.getElementById(elementId);
@@ -1344,4 +1346,10 @@ function parseApexLog(apexLog, runId = null, doc = document) {
             return result;
         }
     }
+}
+
+
+// Export for Node.js tests (without affecting browser usage)
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = { Tokenizer, Parser };
 }
