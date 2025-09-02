@@ -470,6 +470,10 @@ function functionReturnType(name, argTypes) {
             return RESULT_TYPE.Boolean;
         case 'NOW':
             return RESULT_TYPE.DateTime;
+        case 'DATE':
+            return RESULT_TYPE.Date;
+        case 'DATEVALUE':
+            return RESULT_TYPE.Date;
         default:
             return RESULT_TYPE.Unknown;
     }
@@ -744,6 +748,43 @@ function calculateFormula(ast, variables = {}) {
                         return parsedDate;
                     }
                     return new Date();
+                case "DATEVALUE":
+                    if (args.length !== 1) {
+                        throw new Error("DATEVALUE requires exactly one argument");
+                    }
+                    if (args[0] === null || args[0] === undefined || String(args[0]).trim() === '') {
+                        return null;
+                    }
+                    if (isDate(args[0])) {
+                        const d0 = args[0];
+                        return new Date(d0.getFullYear(), d0.getMonth(), d0.getDate());
+                    }
+                    if (typeof args[0] === 'string') {
+                        const d1 = toDate(args[0]);
+                        if (!d1) {
+                            throw new Error("Invalid date format for DATEVALUE");
+                        }
+                        return new Date(d1.getFullYear(), d1.getMonth(), d1.getDate());
+                    }
+                    throw new Error("DATEVALUE argument must be a date/time or text");
+                case "DATE":
+                    if (args.length !== 3) {
+                        throw new Error("DATE requires exactly three arguments: year, month, day");
+                    }
+                    const y = parseInt(args[0], 10);
+                    const m = parseInt(args[1], 10);
+                    const d = parseInt(args[2], 10);
+                    if ([y, m, d].some(v => isNaN(v))) {
+                        throw new Error("DATE arguments must be numeric");
+                    }
+                    if (m < 1 || m > 12) {
+                        throw new Error("DATE month must be between 1 and 12");
+                    }
+                    if (d < 1 || d > 31) {
+                        throw new Error("DATE day must be between 1 and 31");
+                    }
+                    // Construct at midnight local time
+                    return new Date(y, m - 1, d);
                 default: throw new Error(`Unsupported function: ${ast.name}`);
             }
 
@@ -969,9 +1010,9 @@ function displayDataStructure(ast, doc) {
     debugOutput.appendChild(container);
 }
 
-function createAnonymousApexFormula() {
-    // Builds an Anonymous Apex script that evaluates the current formula
-    // using FormulaEval.FormulaBuilder, e.g.:
+// Build a single Anonymous Apex execution that evaluates all steps and logs results
+function buildAnonymousApexForSteps(steps, astRoot, doc, runId) {
+    // Builds Anonymous Apex script that evaluates each formula
     // FormulaEval.FormulaBuilder builder = Formula.builder(); 
     // FormulaEval.FormulaInstance ff = builder
     //     .withFormula('1+2')
@@ -979,222 +1020,6 @@ function createAnonymousApexFormula() {
     //     .withReturnType(FormulaEval.FormulaReturnType.Decimal)
     //     .build();
     // System.debug( ff.evaluate(new Account()) );
-
-    const doc = window.document;
-    const rawFormula = extractFormulaContent(doc) || '';
-    const formula = (rawFormula || '').trim();
-
-    // Basic Apex string escaping for embedding inside single quotes
-    const apexEscape = (s) => (s || '')
-        .replace(/\\/g, '\\\\')
-        .replace(/'/g, "\\'")
-        .replace(/\r/g, '')
-        .replace(/\n/g, '\\n');
-
-    // Try to infer the SObject type from the current URL (Lightning Setup)
-    // Fallback to Account if not found
-    const inferSObjectFromUrl = () => {
-        try {
-            const href = window.location.href || '';
-            // Lightning Object Manager path: .../ObjectManager/Account/FieldsAndRelationships/...
-            const pathMatch = href.match(/ObjectManager\/([A-Za-z0-9_]+)\/Fields/i);
-            if (pathMatch && pathMatch[1]) return pathMatch[1];
-
-            // Check common query params for classic setup
-            const url = new URL(href);
-            const params = url.searchParams;
-            const candidates = ['type', 'ent', 'entity', 'entityname', 'sobject', 'sobjecttype'];
-            for (const key of candidates) {
-                const v = params.get(key);
-                if (v && /^[A-Za-z0-9_]+$/.test(v)) return v;
-            }
-        } catch (_) { /* ignore */ }
-        return 'Account';
-    };
-
-    // Infer return type from parsed AST
-    let returnType = 'Decimal';
-    // Field assignments to populate the SObject during evaluation
-    let assignments = [];
-    try {
-        const parser = new Parser();
-        const ast = parser.parse(formula);
-        annotateTypes(ast);
-        // TODO: type number can also be Integer, Double, Long
-        // and text can be Id too, and Time is missing
-        const typeMap = {
-            'Number': 'Decimal',
-            'Boolean': 'Boolean',
-            'Text': 'String',
-            'Date': 'Date',
-            'DateTime': 'DateTime'
-        };
-        returnType = typeMap[ast.resultType] || 'Decimal';
-
-        // Build field assignments from the current inputs
-        const values = getVariableValues(ast, doc);
-        const variables = extractVariables(ast);
-        const idPattern = /^[A-Za-z_][A-Za-z0-9_]*$/;
-
-        const escapeApexString = (str) => String(str)
-            .replace(/\\/g, '\\\\')
-            .replace(/'/g, "\\'")
-            .replace(/\r/g, '')
-            .replace(/\n/g, '\\n');
-
-        const toApexLiteral = (raw) => {
-            if (raw === null || raw === undefined) return null;
-            const s = String(raw).trim();
-            if (s === '') return null;
-            // boolean
-            if (/^(true|false)$/i.test(s)) return s.toLowerCase();
-            // number
-            const n = Number(s);
-            if (!isNaN(n) && isFinite(n)) return String(n);
-            // date or datetime
-            const isDateOnly = /^\d{4}-\d{2}-\d{2}$/.test(s);
-            const maybeDate = toDate(s);
-            if (maybeDate) {
-                const y = maybeDate.getUTCFullYear();
-                const m = maybeDate.getUTCMonth() + 1;
-                const d = maybeDate.getUTCDate();
-                if (isDateOnly) {
-                    return `Date.newInstance(${y}, ${m}, ${d})`;
-                } else {
-                    const hh = maybeDate.getUTCHours();
-                    const mm = maybeDate.getUTCMinutes();
-                    const ss = maybeDate.getUTCSeconds();
-                    return `DateTime.newInstanceGMT(${y}, ${m}, ${d}, ${hh}, ${mm}, ${ss})`;
-                }
-            }
-            // default to string
-            return `'${escapeApexString(s)}'`;
-        };
-
-        assignments = variables
-            .filter(v => v !== 'NOW()' && idPattern.test(v))
-            .map(v => ({ name: v, expr: toApexLiteral(values[v]) }))
-            .filter(({ expr }) => expr !== null)
-            .map(({ name, expr }) => `${name} = ${expr}`);
-    } catch (e) {
-        // Keep default
-    }
-    const sobjectName = inferSObjectFromUrl();
-
-    const apex = [
-        'FormulaEval.FormulaBuilder builder = Formula.builder();',
-        'FormulaEval.FormulaInstance ff = builder',
-        `    .withFormula('${apexEscape(formula)}')`,
-        `    .withType(${sobjectName}.class)`,
-        `    .withReturnType(FormulaEval.FormulaReturnType.${returnType})`,
-        '    .build();',
-        assignments.length > 0
-            ? `System.debug( ff.evaluate(new ${sobjectName}(${assignments.join(', ')})) );`
-            : `System.debug( ff.evaluate(new ${sobjectName}()) );`
-    ].join('\n');
-
-    return apex;
-}
-
-// Build Anonymous Apex to evaluate a specific AST node expression
-function createAnonymousApexForNode(node, astRoot, doc) {
-    const expression = rebuildFormula(node);
-
-    // Escape string for Apex single-quoted literal
-    const apexEscape = (s) => (s || '')
-        .replace(/\\/g, '\\\\')
-        .replace(/'/g, "\\'")
-        .replace(/\r/g, '')
-        .replace(/\n/g, '\\n');
-
-    const inferSObjectFromUrl = () => {
-        try {
-            const href = window.location.href || '';
-            const pathMatch = href.match(/ObjectManager\/([A-Za-z0-9_]+)\/Fields/i);
-            if (pathMatch && pathMatch[1]) return pathMatch[1];
-            const url = new URL(href);
-            const params = url.searchParams;
-            const candidates = ['type', 'ent', 'entity', 'entityname', 'sobject', 'sobjecttype'];
-            for (const key of candidates) {
-                const v = params.get(key);
-                if (v && /^[A-Za-z0-9_]+$/.test(v)) return v;
-            }
-        } catch (_) { /* ignore */ }
-        return 'Account';
-    };
-
-    // Return type mapping based on node.resultType
-    const typeMap = {
-        'Number': 'Decimal',
-        'Boolean': 'Boolean',
-        'Text': 'String',
-        'Date': 'Date',
-        'DateTime': 'DateTime'
-    };
-    const returnType = typeMap[node.resultType] || 'Decimal';
-
-    // Build field assignments using variables from the root AST
-    const values = getVariableValues(astRoot, doc);
-    const variables = extractVariables(astRoot);
-    const idPattern = /^[A-Za-z_][A-Za-z0-9_]*$/;
-
-    const escapeApexString = (str) => String(str)
-        .replace(/\\/g, '\\\\')
-        .replace(/'/g, "\\'")
-        .replace(/\r/g, '')
-        .replace(/\n/g, '\\n');
-
-    const toApexLiteral = (raw) => {
-        if (raw === null || raw === undefined) return null;
-        const s = String(raw).trim();
-        if (s === '') return null;
-        if (/^(true|false)$/i.test(s)) return s.toLowerCase();
-        const n = Number(s);
-        if (!isNaN(n) && isFinite(n)) return String(n);
-        // const isDateOnly = /^\d{4}-\d{2}-\d{2}$/.test(s);
-        const isDateOnly = /^\d{2}\/\d{2}\/\d{4}$/.test(s);
-        const maybeDate = toDate(s);
-        if (maybeDate) {
-            const y = maybeDate.getUTCFullYear();
-            const m = maybeDate.getUTCMonth() + 1;
-            const d = maybeDate.getUTCDate();
-            if (isDateOnly) {
-                return `Date.newInstance(${y}, ${m}, ${d})`;
-            } else {
-                const hh = maybeDate.getUTCHours();
-                const mm = maybeDate.getUTCMinutes();
-                const ss = maybeDate.getUTCSeconds();
-                return `DateTime.newInstanceGMT(${y}, ${m}, ${d}, ${hh}, ${mm}, ${ss})`;
-            }
-        }
-        return `'${escapeApexString(s)}'`;
-    };
-
-    const assignments = variables
-        .filter(v => v !== 'NOW()' && idPattern.test(v))
-        .map(v => ({ name: v, expr: toApexLiteral(values[v]) }))
-        .filter(({ expr }) => expr !== null)
-        .map(({ name, expr }) => `${name} = ${expr}`);
-
-    const sobjectName = inferSObjectFromUrl();
-
-    const apex = [
-        'FormulaEval.FormulaBuilder builder = Formula.builder();',
-        'FormulaEval.FormulaInstance ff = builder',
-        `    .withFormula('${apexEscape(expression)}')`,
-        `    .withType(${sobjectName}.class)`,
-        `    .withReturnType(FormulaEval.FormulaReturnType.${returnType})`,
-        '    .build();',
-        assignments.length > 0
-            ? `System.debug( ff.evaluate(new ${sobjectName}(${assignments.join(', ')})) );`
-            : `System.debug( ff.evaluate(new ${sobjectName}()) );`
-    ].join('\n');
-
-    return apex;
-}
-
-// Build a single Anonymous Apex execution that evaluates all steps and logs results
-function buildAnonymousApexForSteps(steps, astRoot, doc, runId) {
     const apexEscape = (s) => (s || '')
         .replace(/\\/g, '\\\\')
         .replace(/'/g, "\\'")
@@ -1241,7 +1066,7 @@ function buildAnonymousApexForSteps(steps, astRoot, doc, runId) {
         if (/^(true|false)$/i.test(s)) return s.toLowerCase();
         const n = Number(s);
         if (!isNaN(n) && isFinite(n)) return String(n);
-        const isDateOnly = /^\d{4}-\d{2}-\d{2}$/.test(s);
+        const isDateOnly = /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(s);
         const maybeDate = toDate(s);
         if (maybeDate) {
             const y = maybeDate.getUTCFullYear();
@@ -1268,8 +1093,9 @@ function buildAnonymousApexForSteps(steps, astRoot, doc, runId) {
     const sobjectName = inferSObjectFromUrl();
 
     const lines = [];
-    lines.push('FormulaEval.FormulaBuilder builder;');
+    lines.push('FormulaEval.FormulaBuilder builder = Formula.builder();');
     lines.push('FormulaEval.FormulaInstance ff;');
+    
     if (assignments.length > 0) {
         lines.push(`${sobjectName} obj = new ${sobjectName}(${assignments.join(', ')});`);
     } else {
@@ -1280,7 +1106,6 @@ function buildAnonymousApexForSteps(steps, astRoot, doc, runId) {
         const node = steps[i].node;
         const expr = apexEscape(rebuildFormula(node));
         const rt = typeMap[node.resultType] || 'Decimal';
-        lines.push('builder = Formula.builder();');
         lines.push('ff = builder');
         lines.push(`    .withFormula('${expr}')`);
         lines.push(`    .withType(${sobjectName}.class)`);
