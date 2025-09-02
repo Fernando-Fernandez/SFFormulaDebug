@@ -992,7 +992,7 @@ function createAnonymousApexFormula() {
         const typeMap = {
             'Number': 'Decimal',
             'Boolean': 'Checkbox',
-            'Text': 'Text',
+            'Text': 'String',
             'Date': 'Date',
             'DateTime': 'DateTime'
         };
