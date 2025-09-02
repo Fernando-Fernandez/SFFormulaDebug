@@ -114,6 +114,8 @@ function runDebug() {
 
         const parser = new Parser();
         const ast = parser.parse(formula.trim());
+        // annotate AST with inferred result types
+        annotateTypes(ast);
         
         displayDataStructure(ast, doc);
         
@@ -380,6 +382,173 @@ function extractVariables(ast) {
 
     traverse(ast);
     return Array.from(variables);
+}
+
+// Simple result type system to annotate AST nodes
+const RESULT_TYPE = {
+    Text: 'Text',
+    Number: 'Number',
+    Boolean: 'Boolean',
+    Date: 'Date',
+    DateTime: 'DateTime',
+    Unknown: 'Unknown'
+};
+
+function inferLiteralResultType(value) {
+    if (value === null || value === undefined) return RESULT_TYPE.Unknown;
+    if (typeof value === 'number') return RESULT_TYPE.Number;
+    if (typeof value === 'string') return RESULT_TYPE.Text;
+    if (isDate(value)) return RESULT_TYPE.DateTime; // JS Date holds date-time
+    return RESULT_TYPE.Unknown;
+}
+
+function unifyTypes(a, b) {
+    if (!a) return b || RESULT_TYPE.Unknown;
+    if (!b) return a || RESULT_TYPE.Unknown;
+    if (a === b) return a;
+    // If any is Text, treat as Text
+    if (a === RESULT_TYPE.Text || b === RESULT_TYPE.Text) return RESULT_TYPE.Text;
+    // Date + Number yields Date; DateTime + Number yields DateTime
+    if ((a === RESULT_TYPE.Date && b === RESULT_TYPE.Number) || (b === RESULT_TYPE.Date && a === RESULT_TYPE.Number)) return RESULT_TYPE.Date;
+    if ((a === RESULT_TYPE.DateTime && b === RESULT_TYPE.Number) || (b === RESULT_TYPE.DateTime && a === RESULT_TYPE.Number)) return RESULT_TYPE.DateTime;
+    // Prefer Number over Unknown
+    if (a === RESULT_TYPE.Unknown) return b;
+    if (b === RESULT_TYPE.Unknown) return a;
+    // Fallback to Unknown when incompatible
+    return RESULT_TYPE.Unknown;
+}
+
+function functionReturnType(name, argTypes) {
+    const n = name.toUpperCase();
+    switch (n) {
+        case 'IF':
+            // IF(condition:Boolean, then:X, else:X) => X (unify then/else)
+            return unifyTypes(argTypes[1], argTypes[2]);
+        case 'CONTAINS':
+            return RESULT_TYPE.Boolean;
+        case 'FIND':
+            return RESULT_TYPE.Number;
+        case 'MID':
+            return RESULT_TYPE.Text;
+        case 'FLOOR':
+            return RESULT_TYPE.Number;
+        case 'CASE':
+            // CASE(expression, val1,res1, ..., default) => unify of results
+            if (argTypes.length >= 3) {
+                let t = RESULT_TYPE.Unknown;
+                for (let i = 2; i < argTypes.length; i += 2) {
+                    t = unifyTypes(t, argTypes[i]);
+                }
+                // default at the end if odd count after expression
+                if ((argTypes.length - 1) % 2 === 1) {
+                    t = unifyTypes(t, argTypes[argTypes.length - 1]);
+                }
+                return t;
+            }
+            return RESULT_TYPE.Unknown;
+        case 'AND':
+        case 'OR':
+        case 'NOT':
+        case 'ISPICKVAL':
+        case 'ISBLANK':
+            return RESULT_TYPE.Boolean;
+        case 'NOW':
+            return RESULT_TYPE.DateTime;
+        default:
+            return RESULT_TYPE.Unknown;
+    }
+}
+
+// Annotate AST nodes with resultType by static inference and sample inputs
+function annotateTypes(ast, sampleVariables = {}) {
+    function infer(node) {
+        if (!node) return RESULT_TYPE.Unknown;
+        switch (node.type) {
+            case 'Literal': {
+                node.resultType = inferLiteralResultType(node.value);
+                return node.resultType;
+            }
+            case 'Field': {
+                // Try to infer from provided sample value
+                const v = sampleVariables[node.name];
+                if (v === undefined || v === null || v === '') {
+                    node.resultType = RESULT_TYPE.Unknown;
+                } else if (typeof v === 'number') {
+                    node.resultType = RESULT_TYPE.Number;
+                } else if (isDate(v)) {
+                    node.resultType = RESULT_TYPE.DateTime;
+                } else if (typeof v === 'string') {
+                    // Try to parse date/datetime, else number, else text
+                    const dt = toDate(v);
+                    if (dt) {
+                        // Heuristic: if string includes 'T' assume DateTime; else Date
+                        node.resultType = v.includes('T') ? RESULT_TYPE.DateTime : RESULT_TYPE.Date;
+                    } else if (!isNaN(parseFloat(v))) {
+                        node.resultType = RESULT_TYPE.Number;
+                    } else {
+                        node.resultType = RESULT_TYPE.Text;
+                    }
+                } else {
+                    node.resultType = RESULT_TYPE.Unknown;
+                }
+                return node.resultType;
+            }
+            case 'Operator': {
+                const lt = infer(node.left);
+                const rt = infer(node.right);
+                switch (node.operator) {
+                    case '&&':
+                    case '||':
+                    case '=':
+                    case '!=':
+                    case '<>':
+                    case '<':
+                    case '>':
+                    case '<=':
+                    case '>=':
+                        node.resultType = RESULT_TYPE.Boolean;
+                        break;
+                    case '+': {
+                        if (lt === RESULT_TYPE.Text || rt === RESULT_TYPE.Text) node.resultType = RESULT_TYPE.Text;
+                        else if (lt === RESULT_TYPE.Date && rt === RESULT_TYPE.Number) node.resultType = RESULT_TYPE.Date;
+                        else if (lt === RESULT_TYPE.Number && rt === RESULT_TYPE.Date) node.resultType = RESULT_TYPE.Date;
+                        else if (lt === RESULT_TYPE.DateTime && rt === RESULT_TYPE.Number) node.resultType = RESULT_TYPE.DateTime;
+                        else if (lt === RESULT_TYPE.Number && rt === RESULT_TYPE.DateTime) node.resultType = RESULT_TYPE.DateTime;
+                        else node.resultType = RESULT_TYPE.Number;
+                        break;
+                    }
+                    case '-': {
+                        if ((lt === RESULT_TYPE.Date || lt === RESULT_TYPE.DateTime) && (rt === RESULT_TYPE.Date || rt === RESULT_TYPE.DateTime)) {
+                            node.resultType = RESULT_TYPE.Number; // difference in days
+                        } else if ((lt === RESULT_TYPE.Date || lt === RESULT_TYPE.DateTime) && rt === RESULT_TYPE.Number) {
+                            node.resultType = lt; // same date-like type
+                        } else {
+                            node.resultType = RESULT_TYPE.Number;
+                        }
+                        break;
+                    }
+                    case '*':
+                    case '/':
+                        node.resultType = RESULT_TYPE.Number;
+                        break;
+                    default:
+                        node.resultType = RESULT_TYPE.Unknown;
+                }
+                return node.resultType;
+            }
+            case 'Function': {
+                const argTypes = node.arguments.map(arg => infer(arg));
+                node.resultType = functionReturnType(node.name, argTypes);
+                return node.resultType;
+            }
+            default:
+                node.resultType = RESULT_TYPE.Unknown;
+                return node.resultType;
+        }
+    }
+
+    infer(ast);
+    return ast;
 }
 
 function rebuildFormula(ast) {
@@ -677,18 +846,12 @@ function displayDataStructure(ast, doc) {
     if (!debugOutput) return;
 
     const variables = extractVariables(ast);
-    // const rebuiltFormula = rebuildFormula(ast);
     const steps = extractCalculationSteps(ast);
     
     debugOutput.innerHTML = '';
     
     const container = doc.createElement('div');
     container.style.cssText = 'font-family: Arial, sans-serif;';
-    
-    // const rebuiltDiv = doc.createElement('div');
-    // rebuiltDiv.style.cssText = 'margin-bottom: 15px; padding: 10px; background: #f0f0f0; border-radius: 4px;';
-    // rebuiltDiv.innerHTML = `<strong>Rebuilt Formula:</strong><br><code>${rebuiltFormula}</code>`;
-    //container.appendChild(rebuiltDiv);
     
     if (variables.length > 0) {
         const varsDiv = doc.createElement('div');
@@ -765,7 +928,8 @@ function displayDataStructure(ast, doc) {
         steps.forEach((step, index) => {
             const stepDiv = doc.createElement('div');
             stepDiv.style.cssText = 'margin: 5px 0; padding: 8px; background: #f9f9f9; border-left: 3px solid #007cba; font-family: monospace;';
-            stepDiv.textContent = `${index + 1}. ${step.expression}`;
+            const t = (step.node && step.node.resultType) ? step.node.resultType : 'Unknown';
+            stepDiv.textContent = `${index + 1}. ${step.expression}  ->  ${t}`;
             stepsList.appendChild(stepDiv);
         });
         
@@ -777,18 +941,84 @@ function displayDataStructure(ast, doc) {
 }
 
 function createAnonymousApexFormula() {
+    // Builds an Anonymous Apex script that evaluates the current formula
+    // using FormulaEval.FormulaBuilder, e.g.:
     // FormulaEval.FormulaBuilder builder = Formula.builder(); 
     // FormulaEval.FormulaInstance ff = builder
     //     .withFormula('1+2')
     //     .withType(Account.class)
     //     .withReturnType(FormulaEval.FormulaReturnType.Decimal)
     //     .build();
-    // system.debug( ff.evaluate(new Account()) );
+    // System.debug( ff.evaluate(new Account()) );
+
+    const doc = window.document;
+    const rawFormula = extractFormulaContent(doc) || '';
+    const formula = (rawFormula || '').trim();
+
+    // Basic Apex string escaping for embedding inside single quotes
+    const apexEscape = (s) => (s || '')
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, "\\'")
+        .replace(/\r/g, '')
+        .replace(/\n/g, '\\n');
+
+    // Try to infer the SObject type from the current URL (Lightning Setup)
+    // Fallback to Account if not found
+    const inferSObjectFromUrl = () => {
+        try {
+            const href = window.location.href || '';
+            // Lightning Object Manager path: .../ObjectManager/Account/FieldsAndRelationships/...
+            const pathMatch = href.match(/ObjectManager\/([A-Za-z0-9_]+)\/Fields/i);
+            if (pathMatch && pathMatch[1]) return pathMatch[1];
+
+            // Check common query params for classic setup
+            const url = new URL(href);
+            const params = url.searchParams;
+            const candidates = ['type', 'ent', 'entity', 'entityname', 'sobject', 'sobjecttype'];
+            for (const key of candidates) {
+                const v = params.get(key);
+                if (v && /^[A-Za-z0-9_]+$/.test(v)) return v;
+            }
+        } catch (_) { /* ignore */ }
+        return 'Account';
+    };
+
+    // Infer return type from parsed AST
+    let returnType = 'Decimal';
+    try {
+        const parser = new Parser();
+        const ast = parser.parse(formula);
+        annotateTypes(ast);
+        const typeMap = {
+            'Number': 'Decimal',
+            'Boolean': 'Checkbox',
+            'Text': 'Text',
+            'Date': 'Date',
+            'DateTime': 'DateTime'
+        };
+        returnType = typeMap[ast.resultType] || 'Decimal';
+    } catch (e) {
+        // Keep default
+    }
+    const sobjectName = inferSObjectFromUrl();
+
+    const apex = [
+        'FormulaEval.FormulaBuilder builder = Formula.builder();',
+        'FormulaEval.FormulaInstance ff = builder',
+        `    .withFormula('${apexEscape(formula)}')`,
+        `    .withType(${sobjectName}.class)`,
+        `    .withReturnType(FormulaEval.FormulaReturnType.${returnType})`,
+        '    .build();',
+        `System.debug( ff.evaluate(new ${sobjectName}()) );`
+    ].join('\n');
+
+    return apex;
 }
 
 function calculateAndDisplay(ast, doc) {
-    let anonymousApex = "System.debug( 1 + 2 );";
+    let anonymousApex = createAnonymousApexFormula();
     calculateFormulaViaAnonymousApex( anonymousApex );
+
     const resultDiv = doc.getElementById('calculationResult');
     if (!resultDiv) return;
     
@@ -818,6 +1048,9 @@ function updateStepsWithCalculation(ast, variables, doc) {
     const stepsList = doc.getElementById('stepsList');
     if (!stepsList) return;
     
+    // Re-annotate with types using provided sample values
+    try { annotateTypes(ast, variables); } catch(e) { /* ignore */ }
+
     const steps = extractCalculationSteps(ast);
     stepsList.innerHTML = '';
     
@@ -827,7 +1060,8 @@ function updateStepsWithCalculation(ast, variables, doc) {
         
         const exprDiv = doc.createElement('div');
         exprDiv.style.cssText = 'font-family: monospace; font-weight: bold;';
-        exprDiv.textContent = `${index + 1}. ${step.expression}`;
+        const t = (step.node && step.node.resultType) ? step.node.resultType : 'Unknown';
+        exprDiv.textContent = `${index + 1}. ${step.expression}  ->  ${t}`;
         
         let result;
         try {
@@ -849,44 +1083,44 @@ function updateStepsWithCalculation(ast, variables, doc) {
     });
 }
 
-function analyzeFormula(formula) {
-    try {
-        if (!formula || formula.trim() === '') {
-            return 'No formula to analyze';
-        }
+// function analyzeFormula(formula) {
+//     try {
+//         if (!formula || formula.trim() === '') {
+//             return 'No formula to analyze';
+//         }
 
-        const parser = new Parser();
-        const ast = parser.parse(formula.trim());
+//         const parser = new Parser();
+//         const ast = parser.parse(formula.trim());
         
-        const variables = extractVariables(ast);
-        const rebuiltFormula = rebuildFormula(ast);
-        const steps = extractCalculationSteps(ast);
+//         const variables = extractVariables(ast);
+//         const rebuiltFormula = rebuildFormula(ast);
+//         const steps = extractCalculationSteps(ast);
         
-        let result = `Formula Analysis:\n\n`;
-        result += `Original: ${formula}\n`;
-        result += `Rebuilt: ${rebuiltFormula}\n\n`;
+//         let result = `Formula Analysis:\n\n`;
+//         result += `Original: ${formula}\n`;
+//         result += `Rebuilt: ${rebuiltFormula}\n\n`;
         
-        if (variables.length > 0) {
-            result += `Variables found: ${variables.join(', ')}\n\n`;
-        } else {
-            result += `No variables found\n\n`;
-        }
+//         if (variables.length > 0) {
+//             result += `Variables found: ${variables.join(', ')}\n\n`;
+//         } else {
+//             result += `No variables found\n\n`;
+//         }
         
-        if (steps.length > 0) {
-            result += `Calculation steps (${steps.length}):\n`;
-            steps.forEach((step, index) => {
-                result += `${index + 1}. ${step.expression}\n`;
-            });
-        } else {
-            result += `No calculation steps found\n`;
-        }
+//         if (steps.length > 0) {
+//             result += `Calculation steps (${steps.length}):\n`;
+//             steps.forEach((step, index) => {
+//                 result += `${index + 1}. ${step.expression}\n`;
+//             });
+//         } else {
+//             result += `No calculation steps found\n`;
+//         }
         
-        return result;
+//         return result;
         
-    } catch (error) {
-        return `Formula Analysis Error:\n${error.message}`;
-    }
-}
+//     } catch (error) {
+//         return `Formula Analysis Error:\n${error.message}`;
+//     }
+// }
 
 const GETHOSTANDSESSION = "getHostSession";
 const TOOLING_API_VERSION = 'v57.0';
@@ -897,7 +1131,6 @@ function calculateFormulaViaAnonymousApex( anonymousApex ) {
         , url: location.href 
     };
     chrome.runtime.sendMessage( getHostMessage, resultData => {
-        //console.log( resultData );
         sfHost = resultData.domain;
         sessionId = resultData.session;
 
@@ -907,6 +1140,8 @@ function calculateFormulaViaAnonymousApex( anonymousApex ) {
 }
 
 function runApexToolingAPI( host, sessionId, anonymousApex ) {
+    // TODO:  before executing, check that there is a TraceFlag (with LogType, ExpirationDate, DebugLevelId) enabled
+    // TODO:  if not, insert one via Tooling API
     let encodedApex = encodeURI( anonymousApex ).replaceAll('(', '%28').replaceAll(')', '%29')
                         .replaceAll(';', '%3B').replaceAll('+', '%2B');
     let endpoint = "https://" + host +  "/services/data/" + TOOLING_API_VERSION + "/tooling/executeAnonymous/?anonymousBody=" + encodedApex;
