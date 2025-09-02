@@ -1,3 +1,6 @@
+const GETHOSTANDSESSION = "getHostSession";
+const TOOLING_API_VERSION = 'v57.0';
+
 function urlMatchesFormulaEditor() {
     return window.location.href.includes('/e?');
 }
@@ -45,30 +48,42 @@ function waitForIframeAndElement() {
             return;
         }
         
-        // Check in iframes
-        const iframes = document.getElementsByTagName('iframe');
-        for (let iframe of iframes) {
-            if( iframe.src === '' || iframe.src.includes('chrome-extension:') ) {
-                continue;
-            }
-            try {
-                const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
-                element = iframeDoc.getElementById('CalculatedFormula');
-                if (element) {
-                    injectDebuggerUI(iframeDoc);
-                    return;
-                }
-            } catch (e) {
-                // Cross-origin iframe - can't access
-                console.log('Cannot access iframe:', e);
-            }
-        }
+        // // Check in iframes
+        // const iframes = document.getElementsByTagName('iframe');
+        // for (let iframe of iframes) {
+        //     if( iframe.src === '' || iframe.src.includes('chrome-extension:') ) {
+        //         continue;
+        //     }
+        //     try {
+        //         const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
+        //         element = iframeDoc.getElementById('CalculatedFormula');
+        //         if (element) {
+        //             injectDebuggerUI(iframeDoc);
+        //             return;
+        //         }
+        //     } catch (e) {
+        //         // Cross-origin iframe - can't access
+        //         console.log('Cannot access iframe:', e);
+        //     }
+        // }
         
         // Retry if not found
         setTimeout(checkForElement, 500);
     };
     
     checkForElement();
+}
+
+var host, sessionId;
+function storeHostAndSessionId() {
+    // get host and session from background script
+    let getHostMessage = { message: GETHOSTANDSESSION
+        , url: location.href 
+    };
+    chrome.runtime.sendMessage( getHostMessage, resultData => {
+        host = resultData.domain;
+        sessionId = resultData.session;
+    } );
 }
 
 function createFormulaButton() {
@@ -98,6 +113,7 @@ function createFormulaButton() {
 }
 
 function runDebug() {
+    storeHostAndSessionId();
     let doc = window.document;
     let formula = extractFormulaContent(doc);
     let debugOutput = doc.getElementById('debugOutput');
@@ -907,8 +923,21 @@ function displayDataStructure(ast, doc) {
         calculateBtn.textContent = 'Calculate Formula';
         calculateBtn.type = 'button';
         calculateBtn.style.cssText = 'padding: 8px 16px; background: #007cba; color: white; border: none; border-radius: 4px; cursor: pointer; margin-bottom: 15px;';
-        calculateBtn.addEventListener('click', () => calculateAndDisplay(ast, doc));
+        calculateBtn.addEventListener('click', async () => await calculateAndDisplay(ast, doc));
         container.appendChild(calculateBtn);
+
+        // Switch to control per-step calculation engine
+        const apexToggleWrap = doc.createElement('label');
+        apexToggleWrap.style.cssText = 'display:inline-flex; align-items:center; gap:6px; margin-left:10px; font-size: 12px;';
+        const apexToggle = doc.createElement('input');
+        apexToggle.type = 'checkbox';
+        apexToggle.id = 'use-apex-steps';
+        apexToggle.title = 'Calculate each step via Anonymous Apex';
+        const apexToggleText = doc.createElement('span');
+        apexToggleText.textContent = 'Use Anonymous Apex for steps';
+        apexToggleWrap.appendChild(apexToggle);
+        apexToggleWrap.appendChild(apexToggleText);
+        container.appendChild(apexToggleWrap);
         
         const resultDiv = doc.createElement('div');
         resultDiv.id = 'calculationResult';
@@ -985,18 +1014,68 @@ function createAnonymousApexFormula() {
 
     // Infer return type from parsed AST
     let returnType = 'Decimal';
+    // Field assignments to populate the SObject during evaluation
+    let assignments = [];
     try {
         const parser = new Parser();
         const ast = parser.parse(formula);
         annotateTypes(ast);
+        // TODO: type number can also be Integer, Double, Long
+        // and text can be Id too, and Time is missing
         const typeMap = {
             'Number': 'Decimal',
-            'Boolean': 'Checkbox',
+            'Boolean': 'Boolean',
             'Text': 'String',
             'Date': 'Date',
             'DateTime': 'DateTime'
         };
         returnType = typeMap[ast.resultType] || 'Decimal';
+
+        // Build field assignments from the current inputs
+        const values = getVariableValues(ast, doc);
+        const variables = extractVariables(ast);
+        const idPattern = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+        const escapeApexString = (str) => String(str)
+            .replace(/\\/g, '\\\\')
+            .replace(/'/g, "\\'")
+            .replace(/\r/g, '')
+            .replace(/\n/g, '\\n');
+
+        const toApexLiteral = (raw) => {
+            if (raw === null || raw === undefined) return null;
+            const s = String(raw).trim();
+            if (s === '') return null;
+            // boolean
+            if (/^(true|false)$/i.test(s)) return s.toLowerCase();
+            // number
+            const n = Number(s);
+            if (!isNaN(n) && isFinite(n)) return String(n);
+            // date or datetime
+            const isDateOnly = /^\d{4}-\d{2}-\d{2}$/.test(s);
+            const maybeDate = toDate(s);
+            if (maybeDate) {
+                const y = maybeDate.getUTCFullYear();
+                const m = maybeDate.getUTCMonth() + 1;
+                const d = maybeDate.getUTCDate();
+                if (isDateOnly) {
+                    return `Date.newInstance(${y}, ${m}, ${d})`;
+                } else {
+                    const hh = maybeDate.getUTCHours();
+                    const mm = maybeDate.getUTCMinutes();
+                    const ss = maybeDate.getUTCSeconds();
+                    return `DateTime.newInstanceGMT(${y}, ${m}, ${d}, ${hh}, ${mm}, ${ss})`;
+                }
+            }
+            // default to string
+            return `'${escapeApexString(s)}'`;
+        };
+
+        assignments = variables
+            .filter(v => v !== 'NOW()' && idPattern.test(v))
+            .map(v => ({ name: v, expr: toApexLiteral(values[v]) }))
+            .filter(({ expr }) => expr !== null)
+            .map(({ name, expr }) => `${name} = ${expr}`);
     } catch (e) {
         // Keep default
     }
@@ -1009,15 +1088,113 @@ function createAnonymousApexFormula() {
         `    .withType(${sobjectName}.class)`,
         `    .withReturnType(FormulaEval.FormulaReturnType.${returnType})`,
         '    .build();',
-        `System.debug( ff.evaluate(new ${sobjectName}()) );`
+        assignments.length > 0
+            ? `System.debug( ff.evaluate(new ${sobjectName}(${assignments.join(', ')})) );`
+            : `System.debug( ff.evaluate(new ${sobjectName}()) );`
     ].join('\n');
 
     return apex;
 }
 
-function calculateAndDisplay(ast, doc) {
+// Build Anonymous Apex to evaluate a specific AST node expression
+function createAnonymousApexForNode(node, astRoot, doc) {
+    const expression = rebuildFormula(node);
+
+    // Escape string for Apex single-quoted literal
+    const apexEscape = (s) => (s || '')
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, "\\'")
+        .replace(/\r/g, '')
+        .replace(/\n/g, '\\n');
+
+    const inferSObjectFromUrl = () => {
+        try {
+            const href = window.location.href || '';
+            const pathMatch = href.match(/ObjectManager\/([A-Za-z0-9_]+)\/Fields/i);
+            if (pathMatch && pathMatch[1]) return pathMatch[1];
+            const url = new URL(href);
+            const params = url.searchParams;
+            const candidates = ['type', 'ent', 'entity', 'entityname', 'sobject', 'sobjecttype'];
+            for (const key of candidates) {
+                const v = params.get(key);
+                if (v && /^[A-Za-z0-9_]+$/.test(v)) return v;
+            }
+        } catch (_) { /* ignore */ }
+        return 'Account';
+    };
+
+    // Return type mapping based on node.resultType
+    const typeMap = {
+        'Number': 'Decimal',
+        'Boolean': 'Boolean',
+        'Text': 'String',
+        'Date': 'Date',
+        'DateTime': 'DateTime'
+    };
+    const returnType = typeMap[node.resultType] || 'Decimal';
+
+    // Build field assignments using variables from the root AST
+    const values = getVariableValues(astRoot, doc);
+    const variables = extractVariables(astRoot);
+    const idPattern = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+    const escapeApexString = (str) => String(str)
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, "\\'")
+        .replace(/\r/g, '')
+        .replace(/\n/g, '\\n');
+
+    const toApexLiteral = (raw) => {
+        if (raw === null || raw === undefined) return null;
+        const s = String(raw).trim();
+        if (s === '') return null;
+        if (/^(true|false)$/i.test(s)) return s.toLowerCase();
+        const n = Number(s);
+        if (!isNaN(n) && isFinite(n)) return String(n);
+        const isDateOnly = /^\d{4}-\d{2}-\d{2}$/.test(s);
+        const maybeDate = toDate(s);
+        if (maybeDate) {
+            const y = maybeDate.getUTCFullYear();
+            const m = maybeDate.getUTCMonth() + 1;
+            const d = maybeDate.getUTCDate();
+            if (isDateOnly) {
+                return `Date.newInstance(${y}, ${m}, ${d})`;
+            } else {
+                const hh = maybeDate.getUTCHours();
+                const mm = maybeDate.getUTCMinutes();
+                const ss = maybeDate.getUTCSeconds();
+                return `DateTime.newInstanceGMT(${y}, ${m}, ${d}, ${hh}, ${mm}, ${ss})`;
+            }
+        }
+        return `'${escapeApexString(s)}'`;
+    };
+
+    const assignments = variables
+        .filter(v => v !== 'NOW()' && idPattern.test(v))
+        .map(v => ({ name: v, expr: toApexLiteral(values[v]) }))
+        .filter(({ expr }) => expr !== null)
+        .map(({ name, expr }) => `${name} = ${expr}`);
+
+    const sobjectName = inferSObjectFromUrl();
+
+    const apex = [
+        'FormulaEval.FormulaBuilder builder = Formula.builder();',
+        'FormulaEval.FormulaInstance ff = builder',
+        `    .withFormula('${apexEscape(expression)}')`,
+        `    .withType(${sobjectName}.class)`,
+        `    .withReturnType(FormulaEval.FormulaReturnType.${returnType})`,
+        '    .build();',
+        assignments.length > 0
+            ? `System.debug( ff.evaluate(new ${sobjectName}(${assignments.join(', ')})) );`
+            : `System.debug( ff.evaluate(new ${sobjectName}()) );`
+    ].join('\n');
+
+    return apex;
+}
+
+async function calculateAndDisplay(ast, doc) {
     let anonymousApex = createAnonymousApexFormula();
-    calculateFormulaViaAnonymousApex( anonymousApex );
+    await calculateFormulaViaAnonymousApex( anonymousApex );
 
     const resultDiv = doc.getElementById('calculationResult');
     if (!resultDiv) return;
@@ -1034,7 +1211,7 @@ function calculateAndDisplay(ast, doc) {
         resultDiv.style.background = '#e8f5e8';
         resultDiv.style.borderColor = '#4caf50';
         
-        updateStepsWithCalculation(ast, variables, doc);
+        await updateStepsWithCalculation(ast, variables, doc);
         
     } catch (error) {
         resultDiv.innerHTML = `<strong>Error:</strong> ${error.message}`;
@@ -1044,7 +1221,7 @@ function calculateAndDisplay(ast, doc) {
     }
 }
 
-function updateStepsWithCalculation(ast, variables, doc) {
+async function updateStepsWithCalculation(ast, variables, doc) {
     const stepsList = doc.getElementById('stepsList');
     if (!stepsList) return;
     
@@ -1053,8 +1230,12 @@ function updateStepsWithCalculation(ast, variables, doc) {
 
     const steps = extractCalculationSteps(ast);
     stepsList.innerHTML = '';
+    const useApex = !!(doc.getElementById('use-apex-steps') && doc.getElementById('use-apex-steps').checked);
     
-    steps.forEach((step, index) => {
+    // forEach async does not preserve order, so use for..of
+    //steps.forEach( async (step, index) => {
+    for (const [index, step] of steps.entries()) {
+
         const stepDiv = doc.createElement('div');
         stepDiv.style.cssText = 'margin: 5px 0; padding: 8px; background: #f9f9f9; border-left: 3px solid #007cba;';
         
@@ -1063,24 +1244,34 @@ function updateStepsWithCalculation(ast, variables, doc) {
         const t = (step.node && step.node.resultType) ? step.node.resultType : 'Unknown';
         exprDiv.textContent = `${index + 1}. ${step.expression}  ->  ${t}`;
         
-        let result;
-        try {
-            result = calculateFormula(step.node, variables);
-        } catch (error) {
-            result = `Error: ${error.message}`;
-        }
-        
-        const displayResult = result === null ? 'null' : 
-                             isDate(result) ? result.toLocaleString() : 
-                             typeof result === 'number' && result % 1 !== 0 ? result.toFixed(6) : result;
         const resultSpan = doc.createElement('div');
         resultSpan.style.cssText = 'font-family: monospace; color: #007cba; margin-top: 4px;';
-        resultSpan.textContent = `= ${displayResult}`;
+        if (useApex) {
+            // Build and execute Anonymous Apex for this step
+            try {
+                const apex = createAnonymousApexForNode(step.node, ast, doc);
+                const result = await calculateFormulaViaAnonymousApex(apex);
+                resultSpan.textContent = `= ${result}`;
+            } catch (error) {
+                resultSpan.textContent = `= Apex error: ${error.message}`;
+            }
+        } else {
+            let result;
+            try {
+                result = calculateFormula(step.node, variables);
+            } catch (error) {
+                result = `Error: ${error.message}`;
+            }
+            const displayResult = result === null ? 'null' : 
+                                 isDate(result) ? result.toLocaleString() : 
+                                 typeof result === 'number' && result % 1 !== 0 ? result.toFixed(6) : result;
+            resultSpan.textContent = `= ${displayResult}`;
+        }
         
         stepDiv.appendChild(exprDiv);
         stepDiv.appendChild(resultSpan);
         stepsList.appendChild(stepDiv);
-    });
+    }
 }
 
 // function analyzeFormula(formula) {
@@ -1121,26 +1312,12 @@ function updateStepsWithCalculation(ast, variables, doc) {
 //         return `Formula Analysis Error:\n${error.message}`;
 //     }
 // }
-
-const GETHOSTANDSESSION = "getHostSession";
-const TOOLING_API_VERSION = 'v57.0';
-
-function calculateFormulaViaAnonymousApex( anonymousApex ) {
-    // get host and session from background script
-    let getHostMessage = { message: GETHOSTANDSESSION
-        , url: location.href 
-    };
-    chrome.runtime.sendMessage( getHostMessage, resultData => {
-        sfHost = resultData.domain;
-        sessionId = resultData.session;
-
-        // now that host and session are available, run the tooling API call to execute anonymous apex
-        runApexToolingAPI( sfHost, sessionId, anonymousApex );
-    } );
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function runApexToolingAPI( host, sessionId, anonymousApex ) {
-    // TODO:  before executing, check that there is a TraceFlag (with LogType, ExpirationDate, DebugLevelId) enabled
+async function calculateFormulaViaAnonymousApex( anonymousApex ) {
+    // TODO:  before executing Apex, check that there is a TraceFlag (with LogType, ExpirationDate, DebugLevelId) enabled
     // TODO:  if not, insert one via Tooling API
     let encodedApex = encodeURI( anonymousApex ).replaceAll('(', '%28').replaceAll(')', '%29')
                         .replaceAll(';', '%3B').replaceAll('+', '%2B');
@@ -1152,24 +1329,34 @@ function runApexToolingAPI( host, sessionId, anonymousApex ) {
           , "Authorization": "Bearer " + sessionId
         }
     };
-    let response = fetch( endpoint, request )
-                    .then( ( response ) => response.json() )
-                    .then( ( data ) => {
-                        if( Array.isArray( data ) && data[0].errorCode ) {
-                            console.error( "Could not execute Anonymous Apex: " + data[0].message );
-                            return;
-                        }
-                        if( !data.success ) {
-                            console.error( "Apex execution failed: " + data.compileProblem );
-                            console.error( "Apex execution stack: " + data.exceptionStackTrace );
-                            console.error( "Apex execution exception: " + data.exceptionMessage );
-                            return;
-                        }
-                        retrieveDebugLogId( host, sessionId );
-                    } );
+
+    try {
+        const response = await fetch(endpoint, request);
+        const data = await response.json();
+
+        if (Array.isArray(data) && data[0].errorCode) {
+            console.error("Could not execute Anonymous Apex: " + data[0].message);
+            return;
+        }
+
+        if (!data.success) {
+            console.error("Apex execution failed: " + data.compileProblem);
+            console.error("Apex execution stack: " + data.exceptionStackTrace);
+            console.error("Apex execution exception: " + data.exceptionMessage);
+            return;
+        }
+
+        await sleep(750); // wait a bit to ensure log is ready
+
+        // only reached if successful
+        return retrieveDebugLogId(host, sessionId);
+    } catch (err) {
+        console.error("Network or parsing error:", err);
+    }
+    return null;
 }
 
-function retrieveDebugLogId( host, sessionId ) {
+async function retrieveDebugLogId( host, sessionId ) {
     let endpoint = "https://" + host +  "/services/data/" + TOOLING_API_VERSION + "/tooling/query/?q=SELECT Id FROM ApexLog ORDER BY StartTime DESC LIMIT 1";
     let request = {
         method: "GET"
@@ -1178,23 +1365,29 @@ function retrieveDebugLogId( host, sessionId ) {
           , "Authorization": "Bearer " + sessionId
         }
     };
-    let response = fetch( endpoint, request )
-                    .then( ( response ) => response.json() )
-                    .then( ( data ) => {
-                        if( Array.isArray( data ) && data[0].errorCode ) {
-                            console.error( "Could not find Apex Log: " + data[0].message );
-                            return;
-                        }
-                        if( !data.records || data.records.length == 0 ) {
-                            console.error( "No Apex logs found" );
-                            return;
-                        }
-                        const apexLogId = data.records[0].Id
-                        retrieveDebugLogBody( host, sessionId, apexLogId );
-                    } );
+
+    try {
+        const response = await fetch(endpoint, request);
+        const data = await response.json();
+
+        if( Array.isArray( data ) && data[0].errorCode ) {
+            console.error( "Could not find Apex Log: " + data[0].message );
+            return;
+        }
+        if( !data.records || data.records.length == 0 ) {
+            console.error( "No Apex logs found" );
+            return;
+        }
+
+        return retrieveDebugLogBody( host, sessionId, data.records[0].Id );
+
+    } catch (err) {
+        console.error("Network or parsing error:", err);
+    }
+    return null;
 }
 
-function retrieveDebugLogBody( host, sessionId, apexLogId ) {
+async function retrieveDebugLogBody( host, sessionId, apexLogId ) {
     let endpoint = "https://" + host +  "/services/data/" + TOOLING_API_VERSION + "/tooling/sobjects/ApexLog/" + apexLogId + "/Body";
     let request = {
         method: "GET"
@@ -1203,19 +1396,26 @@ function retrieveDebugLogBody( host, sessionId, apexLogId ) {
           , "Authorization": "Bearer " + sessionId
         }
     };
-    
-    let response = fetch( endpoint, request )
-                    .then( async ( response ) => {
-                        const apexLog = await response.text();
-                        parseApexLog( apexLog );
-                    } );
+
+    try {
+        const response = await fetch(endpoint, request);
+        const data = await response.text();
+
+        return parseApexLog( data );
+
+    } catch (err) {
+        console.error("Network or parsing error:", err);
+    }
+    return null;
 }
 
 function parseApexLog( apexLog ) {
     const logLines = apexLog.split( '\n' );
     for( let line of logLines ) {
         if( line.includes( 'USER_DEBUG' ) ) {
-            console.log( "Formula Debug: " + line );
+            const result = line.match( /^.+?\|DEBUG\|(.*)/ )[1];
+            console.log( "Formula Debug: " + result );
+            return result;
         }
     }
 }
