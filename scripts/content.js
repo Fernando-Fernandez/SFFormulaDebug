@@ -129,7 +129,7 @@ var host, sessionId;
 
 function runDebug() {
     let doc = window.document;
-    let formula = extractFormulaContent(doc);
+    let formula = FormulaUI.extractFormulaContent(doc);
     let debugOutput = doc.getElementById('debugOutput');
     if(!debugOutput) {
         console.error('Debug output element not found.');
@@ -142,23 +142,17 @@ function runDebug() {
             return;
         }
 
-        const parser = new Parser();
-        const ast = parser.parse(formula.trim());
+        const ast = FormulaEngine.parse(formula.trim());
         // annotate AST with inferred result types
-        annotateTypes(ast);
+        FormulaEngine.annotateTypes(ast);
         
-        displayDataStructure(ast, doc);
+        FormulaUI.displayDataStructure(ast, doc);
         
     } catch (error) {
         debugOutput.innerHTML = `<div style="color: red; padding: 10px; background: #ffe8e8; border: 1px solid #f44336; border-radius: 4px;">
             <strong>Formula Analysis Error:</strong><br>${error.message}
         </div>`;
     }
-}
-
-function extractFormulaContent(doc) {
-    let formulaTextarea = doc.getElementById('CalculatedFormula');
-    return formulaTextarea ? formulaTextarea.value || 'No formula content found.' : 'Formula editor not found.';
 }
 
 class Tokenizer {
@@ -902,216 +896,6 @@ function calculateFormula(ast, variables = {}) {
     }
 }
 
-function displayDataStructure(ast, doc) {
-    const debugOutput = doc.getElementById('debugOutput');
-    if (!debugOutput) return;
-
-    const variables = extractVariables(ast);
-    const steps = extractCalculationSteps(ast);
-    
-    debugOutput.innerHTML = '';
-    
-    const container = doc.createElement('div');
-    container.style.cssText = 'font-family: Arial, sans-serif;';
-    
-    if (variables.length > 0) {
-        const varsDiv = doc.createElement('div');
-        varsDiv.style.cssText = 'margin-bottom: 15px;';
-        varsDiv.innerHTML = '<strong>Field Values</strong>';
-        
-        const varsList = doc.createElement('div');
-        varsList.style.cssText = 'margin-top: 10px;';
-        
-        variables.forEach(variable => {
-            const fieldDiv = doc.createElement('div');
-            fieldDiv.style.cssText = 'margin: 5px 0; display: flex; align-items: center;';
-            
-            const label = doc.createElement('span');
-            label.textContent = `${variable}: `;
-            label.style.cssText = 'display: inline-block; width: 120px; font-weight: bold;';
-            
-            const input = doc.createElement('input');
-            input.id = `var-${variable}`;
-            input.style.cssText = 'flex: 1; padding: 4px 8px; border: 1px solid #ccc; border-radius: 3px;';
-            
-            // Special handling for NOW() function
-            if (variable === 'NOW()') {
-                input.type = 'datetime-local';
-                input.placeholder = 'Select date/time for testing';
-                // Set default to current date/time in local datetime format
-                const now = new Date();
-                const localDateTime = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
-                input.value = localDateTime.toISOString().slice(0, 16);
-            } else {
-                input.type = 'text';
-                input.placeholder = `Enter value for ${variable}`;
-            }
-            
-            fieldDiv.appendChild(label);
-            fieldDiv.appendChild(input);
-            
-            // Add helper text for NOW() after the input
-            if (variable === 'NOW()') {
-                const helperText = doc.createElement('div');
-                helperText.style.cssText = 'font-size: 11px; color: #666; margin-top: 2px; margin-left: 120px;';
-                helperText.textContent = 'Leave empty to use current date/time';
-                fieldDiv.appendChild(helperText);
-            }
-            
-            varsList.appendChild(fieldDiv);
-        });
-        
-        varsDiv.appendChild(varsList);
-        container.appendChild(varsDiv);
-        
-        const calculateBtn = doc.createElement('button');
-        calculateBtn.textContent = 'Calculate Formula';
-        calculateBtn.type = 'button';
-        calculateBtn.style.cssText = 'padding: 8px 16px; background: #007cba; color: white; border: none; border-radius: 4px; cursor: pointer; margin-bottom: 15px;';
-        calculateBtn.addEventListener('click', async () => await calculateAndDisplay(ast, doc));
-        container.appendChild(calculateBtn);
-
-        // Switch to control per-step calculation engine
-        const apexToggleWrap = doc.createElement('label');
-        apexToggleWrap.style.cssText = 'display:inline-flex; align-items:center; gap:6px; margin-left:10px; font-size: 12px;';
-        const apexToggle = doc.createElement('input');
-        apexToggle.type = 'checkbox';
-        apexToggle.id = 'use-apex-steps';
-        apexToggle.title = 'Calculate each step via Anonymous Apex';
-        const apexToggleText = doc.createElement('span');
-        apexToggleText.textContent = 'Use Anonymous Apex for steps';
-        apexToggleWrap.appendChild(apexToggle);
-        apexToggleWrap.appendChild(apexToggleText);
-        container.appendChild(apexToggleWrap);
-        
-        const resultDiv = doc.createElement('div');
-        resultDiv.id = 'calculationResult';
-        resultDiv.style.cssText = 'margin: 10px 0; padding: 10px; background: #e8f5e8; border: 1px solid #4caf50; border-radius: 4px; display: none;';
-        container.appendChild(resultDiv);
-    }
-    
-    if (steps.length > 0) {
-        const stepsDiv = doc.createElement('div');
-        stepsDiv.innerHTML = `<strong>Calculation Steps (${steps.length}):</strong>`;
-        stepsDiv.style.cssText = 'margin-bottom: 10px;';
-        
-        const stepsList = doc.createElement('div');
-        stepsList.id = 'stepsList';
-        stepsList.style.cssText = 'margin-top: 10px;';
-        
-        steps.forEach((step, index) => {
-            const stepDiv = doc.createElement('div');
-            stepDiv.style.cssText = 'margin: 5px 0; padding: 8px; background: #f9f9f9; border-left: 3px solid #007cba; font-family: monospace;';
-            const t = (step.node && step.node.resultType) ? step.node.resultType : 'Unknown';
-            stepDiv.textContent = `${index + 1}. ${step.expression}  ->  ${t}`;
-            stepsList.appendChild(stepDiv);
-        });
-        
-        stepsDiv.appendChild(stepsList);
-        container.appendChild(stepsDiv);
-    }
-    
-    debugOutput.appendChild(container);
-}
-
-async function calculateAndDisplay(ast, doc) {
-    const resultDiv = doc.getElementById('calculationResult');
-    if (!resultDiv) return;
-    
-    try {
-        const variables = getVariableValues(ast, doc);
-        const result = calculateFormula(ast, variables);
-        
-        const displayResult = result === null ? 'null' : 
-                             isDate(result) ? result.toLocaleString() : 
-                             typeof result === 'number' && result % 1 !== 0 ? result.toFixed(6) : result;
-        resultDiv.innerHTML = `<strong>Result:</strong> ${displayResult}`;
-        resultDiv.style.display = 'block';
-        resultDiv.style.background = '#e8f5e8';
-        resultDiv.style.borderColor = '#4caf50';
-        
-        await updateStepsWithCalculation(ast, variables, doc);
-        
-    } catch (error) {
-        resultDiv.innerHTML = `<strong>Error:</strong> ${error.message}`;
-        resultDiv.style.display = 'block';
-        resultDiv.style.background = '#ffe8e8';
-        resultDiv.style.borderColor = '#f44336';
-    }
-}
-
-async function updateStepsWithCalculation(ast, variables, doc) {
-    const stepsList = doc.getElementById('stepsList');
-    if (!stepsList) return;
-    
-    // Re-annotate with types using provided sample values
-    try { annotateTypes(ast, variables); } catch(e) { /* ignore */ }
-
-    const steps = extractCalculationSteps(ast);
-    stepsList.innerHTML = '';
-    const useApex = !!(doc.getElementById('use-apex-steps') && doc.getElementById('use-apex-steps').checked);
-    // Correlate one log to this rendering round
-    let runId = null;
-    if (useApex) {
-        runId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    }
-    
-    // forEach async does not preserve order, so use for..of
-    //steps.forEach( async (step, index) => {
-    for (const [index, step] of steps.entries()) {
-
-        const stepDiv = doc.createElement('div');
-        stepDiv.style.cssText = 'margin: 5px 0; padding: 8px; background: #f9f9f9; border-left: 3px solid #007cba;';
-        
-        const exprDiv = doc.createElement('div');
-        exprDiv.style.cssText = 'font-family: monospace; font-weight: bold;';
-        const t = (step.node && step.node.resultType) ? step.node.resultType : 'Unknown';
-        exprDiv.textContent = `${index + 1}. ${step.expression}  ->  ${t}`;
-        
-        const resultSpan = doc.createElement('div');
-        resultSpan.style.cssText = 'font-family: monospace; color: #007cba; margin-top: 4px;';
-        if (!useApex) {
-            let result;
-            try {
-                result = calculateFormula(step.node, variables);
-            } catch (error) {
-                result = `Error: ${error.message}`;
-            }
-            const displayResult = result === null ? 'null' : 
-                                 isDate(result) ? result.toLocaleString() : 
-                                 typeof result === 'number' && result % 1 !== 0 ? result.toFixed(6) : result;
-            resultSpan.textContent = `= ${displayResult}`;
-        } else {
-            // Placeholder; results filled when log returns
-            const idx = index + 1;
-            resultSpan.id = `step-result-${runId}-${idx}`;
-            resultSpan.textContent = '= …';
-        }
-        
-        stepDiv.appendChild(exprDiv);
-        stepDiv.appendChild(resultSpan);
-        stepsList.appendChild(stepDiv);
-    }
-
-    // Submit a single Anonymous Apex with all steps
-    if (useApex) {
-        try {
-            const anonymousApex = buildAnonymousApexForSteps(steps, ast, doc, runId);
-
-            // Delegate to ToolingAPIHandler using the current host/sessionId
-            try {
-                const handler = new ToolingAPIHandler(host, sessionId, TOOLING_API_VERSION);
-                return await handler.executeAnonymous(anonymousApex, runId, doc);
-            } catch (err) {
-                console.error("ToolingAPIHandler error:", err);
-                return null;
-            }
-        } catch (e) {
-            console.error('Failed to run batched Apex for steps:', e);
-        }
-    }
-}
-
 function extractCalculationSteps(ast) {
     const steps = [];
     const seen = new Set();
@@ -1122,7 +906,7 @@ function extractCalculationSteps(ast) {
         switch (node.type) {
             case "Function":
                 node.arguments.forEach(arg => traverse(arg));
-                const expr = rebuildFormula(node);
+                const expr = FormulaEngine.rebuild(node);
                 if (!seen.has(expr)) {
                     seen.add(expr);
                     steps.push({ expression: expr, node });
@@ -1131,7 +915,7 @@ function extractCalculationSteps(ast) {
             case "Operator":
                 traverse(node.left);
                 traverse(node.right);
-                const opExpr = rebuildFormula(node);
+                const opExpr = FormulaEngine.rebuild(node);
                 if (!seen.has(opExpr)) {
                     seen.add(opExpr);
                     steps.push({ expression: opExpr, node });
@@ -1147,123 +931,6 @@ function extractCalculationSteps(ast) {
 
     traverse(ast);
     return steps;
-}
-
-// Build a single Anonymous Apex execution that evaluates all steps and logs results
-function buildAnonymousApexForSteps(steps, astRoot, doc, runId) {
-    // Builds Anonymous Apex script that evaluates each formula
-    // FormulaEval.FormulaBuilder builder = Formula.builder(); 
-    // FormulaEval.FormulaInstance ff = builder
-    //     .withFormula('1+2')
-    //     .withType(Account.class)
-    //     .withReturnType(FormulaEval.FormulaReturnType.Decimal)
-    //     .build();
-    // System.debug( ff.evaluate(new Account()) );
-    const apexEscape = (s) => (s || '')
-        .replace(/\\/g, '\\\\')
-        .replace(/'/g, "\\'")
-        .replace(/\r/g, '')
-        .replace(/\n/g, '\\n');
-
-    const inferSObjectFromUrl = () => {
-        try {
-            const href = window.location.href || '';
-            const pathMatch = href.match(/ObjectManager\/([A-Za-z0-9_]+)\/Fields/i);
-            if (pathMatch && pathMatch[1]) return pathMatch[1];
-            const url = new URL(href);
-            const params = url.searchParams;
-            const candidates = ['type', 'ent', 'entity', 'entityname', 'sobject', 'sobjecttype'];
-            for (const key of candidates) {
-                const v = params.get(key);
-                if (v && /^[A-Za-z0-9_]+$/.test(v)) return v;
-            }
-        } catch (_) { /* ignore */ }
-        return 'Account';
-    };
-
-    const typeMap = {
-        'Number': 'Decimal',
-        'Boolean': 'Boolean',
-        'Text': 'String',
-        'Date': 'Date',
-        'DateTime': 'DateTime'
-    };
-
-    // Build field assignments from the current inputs
-    const values = getVariableValues(astRoot, doc);
-    const variables = extractVariables(astRoot);
-    const idPattern = /^[A-Za-z_][A-Za-z0-9_]*$/;
-    const escapeApexString = (str) => String(str)
-        .replace(/\\/g, '\\\\')
-        .replace(/'/g, "\\'")
-        .replace(/\r/g, '')
-        .replace(/\n/g, '\\n');
-    const toApexLiteral = (raw) => {
-        if (raw === null || raw === undefined) return null;
-        const s = String(raw).trim();
-        if (s === '') return null;
-        if (/^(true|false)$/i.test(s)) return s.toLowerCase();
-        const n = Number(s);
-        if (!isNaN(n) && isFinite(n)) return String(n);
-        const isDateOnly = /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(s);
-        const maybeDate = toDate(s);
-        if (maybeDate) {
-            const y = maybeDate.getUTCFullYear();
-            const m = maybeDate.getUTCMonth() + 1;
-            const d = maybeDate.getUTCDate();
-            if (isDateOnly) {
-                return `Date.newInstance(${y}, ${m}, ${d})`;
-            } else {
-                const hh = maybeDate.getUTCHours();
-                const mm = maybeDate.getUTCMinutes();
-                const ss = maybeDate.getUTCSeconds();
-                return `DateTime.newInstanceGMT(${y}, ${m}, ${d}, ${hh}, ${mm}, ${ss})`;
-            }
-        }
-        return `'${escapeApexString(s)}'`;
-    };
-
-    const assignments = variables
-        .filter(v => v !== 'NOW()' && idPattern.test(v))
-        .map(v => ({ name: v, expr: toApexLiteral(values[v]) }))
-        .filter(({ expr }) => expr !== null)
-        .map(({ name, expr }) => `${name} = ${expr}`);
-
-    const sobjectName = inferSObjectFromUrl();
-
-    const lines = [];
-    lines.push('FormulaEval.FormulaBuilder builder = Formula.builder();');
-    lines.push('FormulaEval.FormulaInstance ff;');
-    
-    if (assignments.length > 0) {
-        lines.push(`${sobjectName} obj = new ${sobjectName}(${assignments.join(', ')});`);
-    } else {
-        lines.push(`${sobjectName} obj = new ${sobjectName}();`);
-    }
-
-    for (let i = 0; i < steps.length; i++) {
-        const node = steps[i].node;
-        const expr = apexEscape(rebuildFormula(node));
-        const rt = typeMap[node.resultType] || 'Decimal';
-        lines.push('ff = builder');
-        lines.push(`    .withFormula('${expr}')`);
-        lines.push(`    .withType(${sobjectName}.class)`);
-        lines.push(`    .withReturnType(FormulaEval.FormulaReturnType.${rt})`);
-        lines.push('    .build();');
-        lines.push(`System.debug('SFDBG|${runId}|${i+1}|' + String.valueOf(ff.evaluate(obj)));`);
-    }
-
-    return lines.join('\n');
-}
-
-function getVariableValues(ast, doc) {
-    const variables = extractVariables(ast);
-    const values = {};
-    variables.forEach(variable => {
-        const input = doc.getElementById(`var-${variable}`);
-        values[variable] = input ? (input.value || "") : "";
-    });
-    return values;
 }
 
 // ToolingAPIHandler
@@ -1342,7 +1009,7 @@ class ToolingAPIHandler {
                 return null;
             }
 
-            await sleep(750);
+            await this.sleep(750);
             return this.retrieveDebugLogId(runId, doc);
         } catch (err) {
             console.error('Network or parsing error:', err);
@@ -1487,7 +1154,7 @@ class ToolingAPIHandler {
             const response = await fetch(endpoint, request);
             const apexLog = await response.text();
             const parsed = this.parseApexLog(apexLog, runId);
-            const displayed = displayParsedResults(parsed, doc);
+            const displayed = this.displayParsedResults(parsed, doc);
             if (displayed) return true;
             return parsed.fallback;
         } catch (err) {
@@ -1535,29 +1202,365 @@ class ToolingAPIHandler {
 
         return { matches, fallback };
     }
+
+    // Sleep helper for throttling Tooling API polling
+    sleep(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    // Display parsed SFDBG results into the provided document
+    displayParsedResults(parsed, doc) {
+        const ctxDoc = doc || (typeof document !== 'undefined' ? document : null);
+        if (!ctxDoc || !parsed || !parsed.matches) return false;
+        let any = false;
+        for (const { rid, stepIndex, value } of parsed.matches) {
+            const elId = `step-result-${rid}-${stepIndex}`;
+            const el = ctxDoc.getElementById(elId);
+            if (el) {
+                el.textContent = `= ${value}`;
+                any = true;
+            }
+        }
+        return any;
+    }
 }
 
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+/**
+ * FormulaEngine: facade around parsing, typing and evaluation helpers.
+ * These wrappers call the existing global functions to preserve behavior.
+ */
+class FormulaEngine {
+    static parse(formula) { const p = new Parser(); return p.parse(formula); }
+    static annotateTypes(ast, sample = {}) { return globalThis.annotateTypes(ast, sample); }
+    static inferLiteralResultType(v) { return globalThis.inferLiteralResultType(v); }
+    static unifyTypes(a, b) { return globalThis.unifyTypes(a, b); }
+    static functionReturnType(name, argTypes) { return globalThis.functionReturnType(name, argTypes); }
+    static rebuild(ast) { return globalThis.rebuildFormula(ast); }
+    static extractVariables(ast) { return globalThis.extractVariables(ast); }
+    static extractCalculationSteps(ast) { return globalThis.extractCalculationSteps(ast); }
+    static calculate(ast, vars = {}) { return globalThis.calculateFormula(ast, vars); }
+    static toDate(v) { return globalThis.toDate(v); }
+    static isDate(v) { return globalThis.isDate(v); }
+    static isDateString(v) { return globalThis.isDateString(v); }
 }
 
-// Display parsed SFDBG results into the provided document
-function displayParsedResults(parsed, doc) {
-    const ctxDoc = doc || (typeof document !== 'undefined' ? document : null);
-    if (!ctxDoc || !parsed || !parsed.matches) return false;
-    let any = false;
-    for (const { rid, stepIndex, value } of parsed.matches) {
-        const elId = `step-result-${rid}-${stepIndex}`;
-        const el = ctxDoc.getElementById(elId);
-        if (el) {
-            el.textContent = `= ${value}`;
-            any = true;
+/**
+ * FormulaUI: wraps DOM-centric helpers used to render and calculate in-page.
+ * Methods forward to existing global functions for a safe, incremental move.
+ */
+class FormulaUI {
+    static extractFormulaContent(doc) {
+        const formulaTextarea = doc.getElementById('CalculatedFormula');
+        return formulaTextarea ? (formulaTextarea.value || 'No formula content found.') : 'Formula editor not found.';
+    }
+
+    static displayDataStructure(ast, doc) {
+        const debugOutput = doc.getElementById('debugOutput');
+        if (!debugOutput) return;
+
+        const variables = FormulaEngine.extractVariables(ast);
+        const steps = FormulaEngine.extractCalculationSteps(ast);
+
+        debugOutput.innerHTML = '';
+
+        const container = doc.createElement('div');
+        container.style.cssText = 'font-family: Arial, sans-serif;';
+
+        if (variables.length > 0) {
+            const varsDiv = doc.createElement('div');
+            varsDiv.style.cssText = 'margin-bottom: 15px;';
+            varsDiv.innerHTML = '<strong>Field Values</strong>';
+
+            const varsList = doc.createElement('div');
+            varsList.style.cssText = 'margin-top: 10px;';
+
+            variables.forEach(variable => {
+                const fieldDiv = doc.createElement('div');
+                fieldDiv.style.cssText = 'margin: 5px 0; display: flex; align-items: center;';
+
+                const label = doc.createElement('span');
+                label.textContent = `${variable}: `;
+                label.style.cssText = 'display: inline-block; width: 120px; font-weight: bold;';
+
+                const input = doc.createElement('input');
+                input.id = `var-${variable}`;
+                input.style.cssText = 'flex: 1; padding: 4px 8px; border: 1px solid #ccc; border-radius: 3px;';
+
+                if (variable === 'NOW()') {
+                    input.type = 'datetime-local';
+                    input.placeholder = 'Select date/time for testing';
+                    const now = new Date();
+                    const localDateTime = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
+                    input.value = localDateTime.toISOString().slice(0, 16);
+                } else {
+                    input.type = 'text';
+                    input.placeholder = `Enter value for ${variable}`;
+                }
+
+                fieldDiv.appendChild(label);
+                fieldDiv.appendChild(input);
+
+                if (variable === 'NOW()') {
+                    const helperText = doc.createElement('div');
+                    helperText.style.cssText = 'font-size: 11px; color: #666; margin-top: 2px; margin-left: 120px;';
+                    helperText.textContent = 'Leave empty to use current date/time';
+                    fieldDiv.appendChild(helperText);
+                }
+
+                varsList.appendChild(fieldDiv);
+            });
+
+            varsDiv.appendChild(varsList);
+            container.appendChild(varsDiv);
+
+            const calculateBtn = doc.createElement('button');
+            calculateBtn.textContent = 'Calculate Formula';
+            calculateBtn.type = 'button';
+            calculateBtn.style.cssText = 'padding: 8px 16px; background: #007cba; color: white; border: none; border-radius: 4px; cursor: pointer; margin-bottom: 15px;';
+            calculateBtn.addEventListener('click', async () => await this.calculateAndDisplay(ast, doc));
+            container.appendChild(calculateBtn);
+
+            const apexToggleWrap = doc.createElement('label');
+            apexToggleWrap.style.cssText = 'display:inline-flex; align-items:center; gap:6px; margin-left:10px; font-size: 12px;';
+            const apexToggle = doc.createElement('input');
+            apexToggle.type = 'checkbox';
+            apexToggle.id = 'use-apex-steps';
+            apexToggle.title = 'Calculate each step via Anonymous Apex';
+            const apexToggleText = doc.createElement('span');
+            apexToggleText.textContent = 'Use Anonymous Apex for steps';
+            apexToggleWrap.appendChild(apexToggle);
+            apexToggleWrap.appendChild(apexToggleText);
+            container.appendChild(apexToggleWrap);
+
+            const resultDiv = doc.createElement('div');
+            resultDiv.id = 'calculationResult';
+            resultDiv.style.cssText = 'margin: 10px 0; padding: 10px; background: #e8f5e8; border: 1px solid #4caf50; border-radius: 4px; display: none;';
+            container.appendChild(resultDiv);
+        }
+
+        if (steps.length > 0) {
+            const stepsDiv = doc.createElement('div');
+            stepsDiv.innerHTML = `<strong>Calculation Steps (${steps.length}):</strong>`;
+            stepsDiv.style.cssText = 'margin-bottom: 10px;';
+
+            const stepsList = doc.createElement('div');
+            stepsList.id = 'stepsList';
+            stepsList.style.cssText = 'margin-top: 10px;';
+
+            steps.forEach((step, index) => {
+                const stepDiv = doc.createElement('div');
+                stepDiv.style.cssText = 'margin: 5px 0; padding: 8px; background: #f9f9f9; border-left: 3px solid #007cba; font-family: monospace;';
+                const t = (step.node && step.node.resultType) ? step.node.resultType : 'Unknown';
+                stepDiv.textContent = `${index + 1}. ${step.expression}  ->  ${t}`;
+                stepsList.appendChild(stepDiv);
+            });
+
+            stepsDiv.appendChild(stepsList);
+            container.appendChild(stepsDiv);
+        }
+
+        debugOutput.appendChild(container);
+    }
+
+    static async calculateAndDisplay(ast, doc) {
+        const resultDiv = doc.getElementById('calculationResult');
+        if (!resultDiv) return;
+
+        try {
+            const variables = this.getVariableValues(ast, doc);
+            const result = FormulaEngine.calculate(ast, variables);
+
+            const displayResult = result === null ? 'null' :
+                                 FormulaEngine.isDate(result) ? result.toLocaleString() :
+                                 typeof result === 'number' && result % 1 !== 0 ? result.toFixed(6) : result;
+            resultDiv.innerHTML = `<strong>Result:</strong> ${displayResult}`;
+            resultDiv.style.display = 'block';
+            resultDiv.style.background = '#e8f5e8';
+            resultDiv.style.borderColor = '#4caf50';
+
+            await this.updateStepsWithCalculation(ast, variables, doc);
+
+        } catch (error) {
+            resultDiv.innerHTML = `<strong>Error:</strong> ${error.message}`;
+            resultDiv.style.display = 'block';
+            resultDiv.style.background = '#ffe8e8';
+            resultDiv.style.borderColor = '#f44336';
         }
     }
-    return any;
+
+    static async updateStepsWithCalculation(ast, variables, doc) {
+        const stepsList = doc.getElementById('stepsList');
+        if (!stepsList) return;
+
+        try { FormulaEngine.annotateTypes(ast, variables); } catch(e) { /* ignore */ }
+
+        const steps = FormulaEngine.extractCalculationSteps(ast);
+        stepsList.innerHTML = '';
+        const useApex = !!(doc.getElementById('use-apex-steps') && doc.getElementById('use-apex-steps').checked);
+        let runId = null;
+        if (useApex) {
+            runId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        }
+
+        for (const [index, step] of steps.entries()) {
+            const stepDiv = doc.createElement('div');
+            stepDiv.style.cssText = 'margin: 5px 0; padding: 8px; background: #f9f9f9; border-left: 3px solid #007cba;';
+
+            const exprDiv = doc.createElement('div');
+            exprDiv.style.cssText = 'font-family: monospace; font-weight: bold;';
+            const t = (step.node && step.node.resultType) ? step.node.resultType : 'Unknown';
+            exprDiv.textContent = `${index + 1}. ${step.expression}  ->  ${t}`;
+
+            const resultSpan = doc.createElement('div');
+            resultSpan.style.cssText = 'font-family: monospace; color: #007cba; margin-top: 4px;';
+            if (!useApex) {
+                let result;
+                try {
+                    result = FormulaEngine.calculate(step.node, variables);
+                } catch (error) {
+                    result = `Error: ${error.message}`;
+                }
+                const displayResult = result === null ? 'null' :
+                                     FormulaEngine.isDate(result) ? result.toLocaleString() :
+                                     typeof result === 'number' && result % 1 !== 0 ? result.toFixed(6) : result;
+                resultSpan.textContent = `= ${displayResult}`;
+            } else {
+                const idx = index + 1;
+                resultSpan.id = `step-result-${runId}-${idx}`;
+                resultSpan.textContent = '= …';
+            }
+
+            stepDiv.appendChild(exprDiv);
+            stepDiv.appendChild(resultSpan);
+            stepsList.appendChild(stepDiv);
+        }
+
+        if (useApex) {
+            try {
+                const anonymousApex = this.buildAnonymousApexForSteps(steps, ast, doc, runId);
+                try {
+                    const handler = new ToolingAPIHandler(host, sessionId, TOOLING_API_VERSION);
+                    return await handler.executeAnonymous(anonymousApex, runId, doc);
+                } catch (err) {
+                    console.error("ToolingAPIHandler error:", err);
+                    return null;
+                }
+            } catch (e) {
+                console.error('Failed to run batched Apex for steps:', e);
+            }
+        }
+    }
+
+    // Build a single Anonymous Apex execution that evaluates all steps and logs results
+    static buildAnonymousApexForSteps(steps, astRoot, doc, runId) {
+        const apexEscape = (s) => (s || '')
+            .replace(/\\/g, '\\\\')
+            .replace(/'/g, "\\'")
+            .replace(/\r/g, '')
+            .replace(/\n/g, '\\n');
+
+        const inferSObjectFromUrl = () => {
+            try {
+                const href = window.location.href || '';
+                const pathMatch = href.match(/ObjectManager\/([A-Za-z0-9_]+)\/Fields/i);
+                if (pathMatch && pathMatch[1]) return pathMatch[1];
+                const url = new URL(href);
+                const params = url.searchParams;
+                const candidates = ['type', 'ent', 'entity', 'entityname', 'sobject', 'sobjecttype'];
+                for (const key of candidates) {
+                    const v = params.get(key);
+                    if (v && /^[A-Za-z0-9_]+$/.test(v)) return v;
+                }
+            } catch (_) { /* ignore */ }
+            return 'Account';
+        };
+
+        const typeMap = {
+            'Number': 'Decimal',
+            'Boolean': 'Boolean',
+            'Text': 'String',
+            'Date': 'Date',
+            'DateTime': 'DateTime'
+        };
+
+        const values = this.getVariableValues(astRoot, doc);
+        const variables = FormulaEngine.extractVariables(astRoot);
+        const idPattern = /^[A-Za-z_][A-Za-z0-9_]*$/;
+        const escapeApexString = (str) => String(str)
+            .replace(/\\/g, '\\\\')
+            .replace(/'/g, "\\'")
+            .replace(/\r/g, '')
+            .replace(/\n/g, '\\n');
+        const toApexLiteral = (raw) => {
+            if (raw === null || raw === undefined) return null;
+            const s = String(raw).trim();
+            if (s === '') return null;
+            if (/^(true|false)$/i.test(s)) return s.toLowerCase();
+            const n = Number(s);
+            if (!isNaN(n) && isFinite(n)) return String(n);
+            const isDateOnly = /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(s);
+            const maybeDate = FormulaEngine.toDate(s);
+            if (maybeDate) {
+                const y = maybeDate.getUTCFullYear();
+                const m = maybeDate.getUTCMonth() + 1;
+                const d = maybeDate.getUTCDate();
+                if (isDateOnly) {
+                    return `Date.newInstance(${y}, ${m}, ${d})`;
+                } else {
+                    const hh = maybeDate.getUTCHours();
+                    const mm = maybeDate.getUTCMinutes();
+                    const ss = maybeDate.getUTCSeconds();
+                    return `DateTime.newInstanceGMT(${y}, ${m}, ${d}, ${hh}, ${mm}, ${ss})`;
+                }
+            }
+            return `'${escapeApexString(s)}'`;
+        };
+
+        const assignments = variables
+            .filter(v => v !== 'NOW()' && idPattern.test(v))
+            .map(v => ({ name: v, expr: toApexLiteral(values[v]) }))
+            .filter(({ expr }) => expr !== null)
+            .map(({ name, expr }) => `${name} = ${expr}`);
+
+        const sobjectName = inferSObjectFromUrl();
+
+        const lines = [];
+        lines.push('FormulaEval.FormulaBuilder builder = Formula.builder();');
+        lines.push('FormulaEval.FormulaInstance ff;');
+
+        if (assignments.length > 0) {
+            lines.push(`${sobjectName} obj = new ${sobjectName}(${assignments.join(', ')});`);
+        } else {
+            lines.push(`${sobjectName} obj = new ${sobjectName}();`);
+        }
+
+        for (let i = 0; i < steps.length; i++) {
+            const node = steps[i].node;
+            const expr = apexEscape(FormulaEngine.rebuild(node));
+            const rt = typeMap[node.resultType] || 'Decimal';
+            lines.push('ff = builder');
+            lines.push(`    .withFormula('${expr}')`);
+            lines.push(`    .withType(${sobjectName}.class)`);
+            lines.push(`    .withReturnType(FormulaEval.FormulaReturnType.${rt})`);
+            lines.push('    .build();');
+            lines.push(`System.debug('SFDBG|${runId}|${i+1}|' + String.valueOf(ff.evaluate(obj)));`);
+        }
+
+        return lines.join('\n');
+    }
+
+    static getVariableValues(ast, doc) {
+        const variables = FormulaEngine.extractVariables(ast);
+        const values = {};
+        variables.forEach(variable => {
+            const input = doc.getElementById(`var-${variable}`);
+            values[variable] = input ? (input.value || "") : "";
+        });
+        return values;
+    }
 }
 
 // Export for Node.js tests (without affecting browser usage)
 if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { Tokenizer, Parser, ToolingAPIHandler };
+    module.exports = { Tokenizer, Parser, ToolingAPIHandler, FormulaEngine, FormulaUI };
 }
