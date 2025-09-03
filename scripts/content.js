@@ -1276,6 +1276,12 @@ class ToolingAPIHandler {
     }
 
     async executeAnonymous(anonymousApex, runId = null, doc = null) {
+        // Ensure there is an active TraceFlag for the current user
+        try {
+            await this.ensureActiveTraceFlag();
+        } catch (e) {
+            console.warn('Could not ensure TraceFlag:', e);
+        }
         const endpoint = `https://${this.host}/services/data/${this.apiVersion}/tooling/executeAnonymous/?anonymousBody=${this.encodeAnonymous(anonymousApex)}`;
         const request = {
             method: 'GET',
@@ -1305,6 +1311,111 @@ class ToolingAPIHandler {
             return this.retrieveDebugLogId(runId, doc);
         } catch (err) {
             console.error('Network or parsing error:', err);
+        }
+        return null;
+    }
+
+    async ensureActiveTraceFlag() {
+        const userId = await this.getCurrentUserId();
+        if (!userId) return false;
+
+        // Check for existing active TraceFlag
+        const now = new Date();
+        const q = encodeURIComponent(`SELECT Id, StartDate, ExpirationDate, DebugLevelId FROM TraceFlag WHERE TracedEntityId='${userId}' ORDER BY ExpirationDate DESC`);
+        const tfEndpoint = `https://${this.host}/services/data/${this.apiVersion}/tooling/query/?q=${q}`;
+        const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.sessionId}` };
+        try {
+            const resp = await fetch(tfEndpoint, { method: 'GET', headers });
+            const data = await resp.json();
+            if (data && data.records && data.records.length) {
+                const active = data.records.find(r => {
+                    const start = r.StartDate ? new Date(r.StartDate) : null;
+                    const exp = r.ExpirationDate ? new Date(r.ExpirationDate) : null;
+                    return (!start || start <= now) && exp && exp > now;
+                });
+                if (active) return true;
+            }
+        } catch (e) {
+            console.warn('TraceFlag query failed', e);
+        }
+
+        // Ensure a DebugLevel exists
+        const debugLevelId = await this.ensureDebugLevel();
+        if (!debugLevelId) return false;
+
+        // Create TraceFlag for next 5 minutes
+        const start = new Date();
+        const exp = new Date(start.getTime() + 5 * 60 * 1000);
+        const body = {
+            TracedEntityId: userId,
+            DebugLevelId: debugLevelId,
+            LogType: 'USER_DEBUG',
+            StartDate: start.toISOString(),
+            ExpirationDate: exp.toISOString()
+        };
+        const createEndpoint = `https://${this.host}/services/data/${this.apiVersion}/tooling/sobjects/TraceFlag`;
+        try {
+            const createResp = await fetch(createEndpoint, { method: 'POST', headers, body: JSON.stringify(body) });
+            const res = await createResp.json();
+            if (res && res.success) return true;
+            // Some orgs return id without success; treat as ok
+            if (res && res.id) return true;
+            console.warn('TraceFlag create failed', res);
+        } catch (e) {
+            console.warn('TraceFlag create error', e);
+        }
+        return false;
+    }
+
+    async ensureDebugLevel() {
+        const name = 'SFFormulaDebug';
+        const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.sessionId}` };
+        const q = encodeURIComponent(`SELECT Id FROM DebugLevel WHERE DeveloperName='${name}'`);
+        const dlEndpoint = `https://${this.host}/services/data/${this.apiVersion}/tooling/query/?q=${q}`;
+        try {
+            const resp = await fetch(dlEndpoint, { method: 'GET', headers });
+            const data = await resp.json();
+            if (data && data.records && data.records.length) {
+                return data.records[0].Id;
+            }
+        } catch (e) {
+            console.warn('DebugLevel query failed', e);
+        }
+
+        // Create DebugLevel
+        const createEndpoint = `https://${this.host}/services/data/${this.apiVersion}/tooling/sobjects/DebugLevel`;
+        const body = {
+            DeveloperName: name,
+            MasterLabel: name,
+            ApexCode: 'DEBUG',
+            ApexProfiling: 'INFO',
+            Callout: 'INFO',
+            Database: 'INFO',
+            System: 'DEBUG',
+            Validation: 'INFO',
+            Visualforce: 'INFO',
+            Workflow: 'INFO'
+        };
+        try {
+            const resp = await fetch(createEndpoint, { method: 'POST', headers, body: JSON.stringify(body) });
+            const data = await resp.json();
+            if (data && data.id) return data.id;
+        } catch (e) {
+            console.warn('DebugLevel create failed', e);
+        }
+        return null;
+    }
+
+    async getCurrentUserId() {
+        const endpoint = `https://${this.host}/services/data/${this.apiVersion}/chatter/users/me`;
+        const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.sessionId}` };
+        try {
+            const resp = await fetch(endpoint, { method: 'GET', headers });
+            const data = await resp.json();
+            // Chatter users/me includes id
+            if (data && data.id) return data.id;
+        } catch (e) {
+            console.warn('Could not get current user id', e);
         }
         return null;
     }
@@ -1352,7 +1463,7 @@ class ToolingAPIHandler {
         try {
             const response = await fetch(endpoint, request);
             const apexLog = await response.text();
-            const parsed = parseApexLog(apexLog, runId);
+            const parsed = this.parseApexLog(apexLog, runId);
             const displayed = displayParsedResults(parsed, doc);
             if (displayed) return true;
             return parsed.fallback;

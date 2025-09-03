@@ -15,6 +15,18 @@ test('ToolingAPIHandler.executeAnonymous success path updates doc from SFDBG mar
 
   const runId = 'testrun';
   const mockFetch = async (url, req) => {
+    if (url.includes('/chatter/users/me')) {
+      return { json: async () => ({ id: '005xx0000000001' }) };
+    }
+    if (url.includes('/tooling/query/') && url.includes('FROM%20TraceFlag')) {
+      return { json: async () => ({ records: [] }) };
+    }
+    if (url.includes('/tooling/query/') && url.includes('FROM%20DebugLevel')) {
+      return { json: async () => ({ records: [{ Id: '07LxxDL00000001' }] }) };
+    }
+    if (url.includes('/tooling/sobjects/TraceFlag') && req.method === 'POST') {
+      return { json: async () => ({ id: '07LxxTF00000001', success: true }) };
+    }
     if (url.includes('/executeAnonymous/')) {
       return { json: async () => ({ success: true }) };
     }
@@ -45,6 +57,18 @@ test('ToolingAPIHandler.executeAnonymous success path updates doc from SFDBG mar
 test('ToolingAPIHandler.executeAnonymous returns fallback first USER_DEBUG when no markers', async () => {
   const runId = 'norun';
   const mockFetch = async (url, req) => {
+    if (url.includes('/chatter/users/me')) {
+      return { json: async () => ({ id: '005xx0000000002' }) };
+    }
+    if (url.includes('/tooling/query/') && url.includes('FROM%20TraceFlag')) {
+      return { json: async () => ({ records: [] }) };
+    }
+    if (url.includes('/tooling/query/') && url.includes('FROM%20DebugLevel')) {
+      return { json: async () => ({ records: [{ Id: '07LxxDL00000002' }] }) };
+    }
+    if (url.includes('/tooling/sobjects/TraceFlag') && req.method === 'POST') {
+      return { json: async () => ({ id: '07LxxTF00000002', success: true }) };
+    }
     if (url.includes('/executeAnonymous/')) {
       return { json: async () => ({ success: true }) };
     }
@@ -70,6 +94,18 @@ test('ToolingAPIHandler.executeAnonymous returns fallback first USER_DEBUG when 
 
 test('ToolingAPIHandler.executeAnonymous handles execution error response', async () => {
   const mockFetch = async (url, req) => {
+    if (url.includes('/chatter/users/me')) {
+      return { json: async () => ({ id: '005xx0000000003' }) };
+    }
+    if (url.includes('/tooling/query/') && url.includes('FROM%20TraceFlag')) {
+      return { json: async () => ({ records: [] }) };
+    }
+    if (url.includes('/tooling/query/') && url.includes('FROM%20DebugLevel')) {
+      return { json: async () => ({ records: [{ Id: '07LxxDL00000003' }] }) };
+    }
+    if (url.includes('/tooling/sobjects/TraceFlag') && req.method === 'POST') {
+      return { json: async () => ({ id: '07LxxTF00000003', success: true }) };
+    }
     if (url.includes('/executeAnonymous/')) {
       return { json: async () => ([{ errorCode: 'INVALID_SESSION_ID', message: 'Nope' }]) };
     }
@@ -85,4 +121,3 @@ test('ToolingAPIHandler.executeAnonymous handles execution error response', asyn
     global.fetch = origFetch;
   }
 });
-
