@@ -1244,46 +1244,20 @@ async function retrieveDebugLogBody( hostArg, sessionIdArg, apexLogId, runId = n
     }
 }
 
-function parseApexLogAndDisplayResults(apexLog, runId = null, doc = null) {
-    const logLines = apexLog.split('\n');
-    const pipe = '&#124;';
-    const marker = 'SFDBG' + pipe;
-    let matched = false;
+// Display parsed SFDBG results into the provided document
+function displayParsedResults(parsed, doc) {
     const ctxDoc = doc || (typeof document !== 'undefined' ? document : null);
-
-    for (let line of logLines) {
-        if (line.includes('USER_DEBUG') && line.includes(marker)) {
-            const msgMatch = line.match(/\|DEBUG\|(.*)$/);
-            const msg = msgMatch ? msgMatch[1] : '';
-            const idx = msg.indexOf(marker);
-            if (idx >= 0) {
-                const payload = msg.substring(idx + marker.length);
-                const parts = payload.split(pipe);
-                const rid = parts[0];
-                const stepIndex = parts[1];
-                const value = parts.slice(2).join(pipe);
-                if ((!runId || rid === runId) && ctxDoc) {
-                    const elId = `step-result-${rid}-${stepIndex}`;
-                    const el = ctxDoc.getElementById(elId);
-                    if (el) {
-                        el.textContent = `= ${value}`;
-                        matched = true;
-                    }
-                }
-            }
+    if (!ctxDoc || !parsed || !parsed.matches) return false;
+    let any = false;
+    for (const { rid, stepIndex, value } of parsed.matches) {
+        const elId = `step-result-${rid}-${stepIndex}`;
+        const el = ctxDoc.getElementById(elId);
+        if (el) {
+            el.textContent = `= ${value}`;
+            any = true;
         }
     }
-
-    if (matched) return true;
-
-    // Fallback to previous behavior: return first USER_DEBUG message
-    for (let line of logLines) {
-        if (line.includes('USER_DEBUG')) {
-            const result = line.match(/^.+?\|DEBUG\|(.*)/)[1];
-            console.log('Formula Debug:', result);
-            return result;
-        }
-    }
+    return any;
 }
 
 class ToolingAPIHandler {
@@ -1378,11 +1352,50 @@ class ToolingAPIHandler {
         try {
             const response = await fetch(endpoint, request);
             const apexLog = await response.text();
-            return parseApexLogAndDisplayResults(apexLog, runId, doc);
+            const parsed = parseApexLog(apexLog, runId);
+            const displayed = displayParsedResults(parsed, doc);
+            if (displayed) return true;
+            return parsed.fallback;
         } catch (err) {
             console.error('Network or parsing error:', err);
         }
         return null;
+    }
+
+    // Parse Apex log and extract SFDBG results and fallback message
+    parseApexLog(apexLog, runId = null) {
+        const logLines = apexLog.split('\n');
+        const pipe = '&#124;';
+        const marker = 'SFDBG' + pipe;
+        const matches = [];
+        let fallback = null;
+
+        for (let line of logLines) {
+            if (line.includes('USER_DEBUG')) {
+                // Capture first USER_DEBUG as fallback if no markers found
+                if (fallback === null) {
+                    const m = line.match(/^.+?\|DEBUG\|(.*)/);
+                    if (m) fallback = m[1];
+                }
+                if (line.includes(marker)) {
+                    const msgMatch = line.match(/\|DEBUG\|(.*)$/);
+                    const msg = msgMatch ? msgMatch[1] : '';
+                    const idx = msg.indexOf(marker);
+                    if (idx >= 0) {
+                        const payload = msg.substring(idx + marker.length);
+                        const parts = payload.split(pipe);
+                        const rid = parts[0];
+                        const stepIndex = parts[1];
+                        const value = parts.slice(2).join(pipe);
+                        if (!runId || rid === runId) {
+                            matches.push({ rid, stepIndex, value });
+                        }
+                    }
+                }
+            }
+        }
+
+        return { matches, fallback };
     }
 }
 
