@@ -1,9 +1,7 @@
 const GETHOSTANDSESSION = "getHostSession";
 const TOOLING_API_VERSION = 'v57.0';
 
-// TODO:  show field input elements in 2 columns
 // TODO:  add formula step results on each node of the Mermaid diagram
-// TODO:  omit result type from Mermaid diagram
 // TODO:  handle formulas in flow context (different URL)
 
 var host, sessionId;
@@ -1232,24 +1230,23 @@ class FormulaUI {
             .replace(/\n/g, '\\n');
 
         const renderLabel = (node) => {
-            const rt = node && node.resultType ? ` : ${node.resultType}` : '';
             switch (node.type) {
                 case 'Function': {
                     const expr = FormulaEngine.rebuild(node);
-                    return `${expr}${rt}`;
+                    return `${expr}`;
                 }
                 case 'Operator': {
                     const expr = FormulaEngine.rebuild(node);
-                    return `${expr}${rt}`;
+                    return `${expr}`;
                 }
                 case 'Field':
-                    return `${node.name}${rt}`;
+                    return `${node.name}`;
                 case 'Literal': {
                     let v = node.value;
                     if (v === null) v = 'null';
                     else if (v instanceof Date) v = v.toISOString();
                     else if (typeof v === 'string') v = `${v}`;
-                    return `${v}${rt}`;
+                    return `${v}`;
                 }
                 default:
                     return `Unknown`;
@@ -1312,11 +1309,11 @@ class FormulaUI {
             varsDiv.innerHTML = '<strong>Field Values</strong>';
 
             const varsList = doc.createElement('div');
-            varsList.style.cssText = 'margin-top: 10px;';
+            varsList.style.cssText = 'margin-top: 10px; display: grid; grid-template-columns: repeat(3, minmax(280px, 1fr)); gap: 8px 16px; align-items: start;';
 
             variables.forEach(variable => {
                 const fieldDiv = doc.createElement('div');
-                fieldDiv.style.cssText = 'margin: 5px 0; display: flex; align-items: center;';
+                fieldDiv.style.cssText = 'display: flex; align-items: center;';
 
                 const label = doc.createElement('span');
                 label.textContent = `${variable}: `;
