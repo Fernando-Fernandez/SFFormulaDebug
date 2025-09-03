@@ -1,121 +1,102 @@
 const GETHOSTANDSESSION = "getHostSession";
 const TOOLING_API_VERSION = 'v57.0';
 
-function urlMatchesFormulaEditor() {
-    return window.location.href.includes('/e?');
+// UIBootstrap groups URL checks, DOM waits, and UI injection
+class UIBootstrap {
+    constructor({ doc = (typeof window !== 'undefined' ? window.document : null),
+                  win = (typeof window !== 'undefined' ? window : null),
+                  chromeRuntime = (typeof chrome !== 'undefined' ? chrome.runtime : null),
+                  onRunDebug = null } = {}) {
+        this.doc = doc;
+        this.win = win;
+        this.chromeRuntime = chromeRuntime;
+        this.onRunDebug = onRunDebug || (() => runDebug());
+        this._mounted = false;
+    }
+
+    locationMatchesFormulaEditor() {
+        try { return this.win && this.win.location && this.win.location.href.includes('/e?'); }
+        catch { return false; }
+    }
+
+    init() {
+        if (!this.doc || !this.win || !this.locationMatchesFormulaEditor()) return;
+        if (this.win === this.win.top) {
+            this.waitForIframeAndElement();
+        } else {
+            this.waitForElement('CalculatedFormula', () => this.injectUI());
+        }
+    }
+
+    waitForElement(elementId, callback) {
+        const element = this.doc.getElementById(elementId);
+        if (element) { callback(); return; }
+
+        const observer = new MutationObserver((mutations, obs) => {
+            const el = this.doc.getElementById(elementId);
+            if (el) { obs.disconnect(); callback(); }
+        });
+        observer.observe(this.doc, { childList: true, subtree: true });
+    }
+
+    waitForIframeAndElement() {
+        const checkForElement = () => {
+            // Check in main document first
+            let element = this.doc.getElementById('CalculatedFormula');
+            if (element) { this.injectUI(); return; }
+            // Retry if not found (iframes are cross-origin and inaccessible here)
+            setTimeout(checkForElement, 500);
+        };
+        checkForElement();
+    }
+
+    async fetchHostAndSession() {
+        if (!this.chromeRuntime) return;
+        return new Promise(resolve => {
+            const getHostMessage = { message: GETHOSTANDSESSION, url: (this.win ? this.win.location.href : '') };
+            this.chromeRuntime.sendMessage(getHostMessage, resultData => {
+                host = resultData && resultData.domain; // global vars used elsewhere
+                sessionId = resultData && resultData.session;
+                resolve({ host, sessionId });
+            });
+        });
+    }
+
+    injectUI() {
+        if (this._mounted) return;
+        const formulaTextarea = this.doc.getElementById('CalculatedFormula');
+        if (!formulaTextarea) return;
+        if (this.doc.getElementById('formulaDebugger')) return;
+
+        const debuggerDiv = this.doc.createElement('div');
+        debuggerDiv.id = 'formulaDebugger';
+        debuggerDiv.style.cssText = 'margin-top: 10px; padding: 10px; border: 1px solid #ccc; background: #f9f9f9; font-family: Arial, sans-serif;';
+        debuggerDiv.innerHTML = `
+            <button id="runDebug" type="button" style="padding: 5px 10px;">Run Formula Debugger</button>
+            <div id="debugOutput">Debug output will appear here once implemented.</div>
+        `;
+        formulaTextarea.parentNode.insertBefore(debuggerDiv, formulaTextarea.nextSibling);
+
+        const btn = this.doc.getElementById('runDebug');
+        if (btn) {
+            btn.addEventListener('click', async () => {
+                await this.fetchHostAndSession();
+                this.onRunDebug();
+            });
+        }
+        this._mounted = true;
+    }
 }
 
 // Initialize content script when iframe is loaded (guarded for Node tests)
-if (typeof window !== 'undefined' && urlMatchesFormulaEditor()) {
-
-    // Check if we're in the main frame or iframe
-    if (window === window.top) {
-        // Main frame - wait for iframe and element
-        waitForIframeAndElement();
-    } else {
-        // We're in an iframe - check for the element directly
-        waitForElement('CalculatedFormula', createFormulaButton);
-    }
-}
-
-// (module.exports assigned at end of file after class declarations)
-
-function waitForElement(elementId, callback) {
-    const element = document.getElementById(elementId);
-    if (element) {
-        callback();
-        return;
-    }
-
-    const observer = new MutationObserver((mutations, obs) => {
-        const element = document.getElementById(elementId);
-        if (element) {
-            obs.disconnect();
-            callback();
-        }
-    });
-
-    observer.observe(document, {
-        childList: true,
-        subtree: true
-    });
-}
-
-function waitForIframeAndElement() {
-    const checkForElement = () => {
-        // Check in main document first
-        let element = document.getElementById('CalculatedFormula');
-        if (element) {
-            createFormulaButton();
-            return;
-        }
-        
-        // // Check in iframes
-        // const iframes = document.getElementsByTagName('iframe');
-        // for (let iframe of iframes) {
-        //     if( iframe.src === '' || iframe.src.includes('chrome-extension:') ) {
-        //         continue;
-        //     }
-        //     try {
-        //         const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
-        //         element = iframeDoc.getElementById('CalculatedFormula');
-        //         if (element) {
-        //             injectDebuggerUI(iframeDoc);
-        //             return;
-        //         }
-        //     } catch (e) {
-        //         // Cross-origin iframe - can't access
-        //         console.log('Cannot access iframe:', e);
-        //     }
-        // }
-        
-        // Retry if not found
-        setTimeout(checkForElement, 500);
-    };
-    
-    checkForElement();
+if (typeof window !== 'undefined') {
+    const uiBootstrap = new UIBootstrap();
+    uiBootstrap.init();
 }
 
 var host, sessionId;
-function storeHostAndSessionId() {
-    // get host and session from background script
-    let getHostMessage = { message: GETHOSTANDSESSION
-        , url: location.href 
-    };
-    chrome.runtime.sendMessage( getHostMessage, resultData => {
-        host = resultData.domain;
-        sessionId = resultData.session;
-    } );
-}
-
-function createFormulaButton() {
-    let doc = window.document;
-    let formulaTextarea = doc.getElementById('CalculatedFormula');
-    if (!formulaTextarea) {
-        console.log('Could not find formula textarea after multiple attempts.');
-        return;
-    }
-    
-    if (doc.getElementById('formulaDebugger')) {
-        console.log('Formula Debugger already set up.');
-        return;
-    }
-
-    let debuggerDiv = doc.createElement('div');
-    debuggerDiv.id = 'formulaDebugger';
-    debuggerDiv.style.cssText = 'margin-top: 10px; padding: 10px; border: 1px solid #ccc; background: #f9f9f9; font-family: Arial, sans-serif;';
-    debuggerDiv.innerHTML = `
-        <button id="runDebug" type="button" style="padding: 5px 10px;">Run Formula Debugger</button>
-        <div id="debugOutput">Debug output will appear here once implemented.</div>
-    `;
-    formulaTextarea.parentNode.insertBefore(debuggerDiv, formulaTextarea.nextSibling);
-
-    // Add event listener for debug button
-    doc.getElementById('runDebug').addEventListener('click', runDebug);
-}
 
 function runDebug() {
-    storeHostAndSessionId();
     let doc = window.document;
     let formula = extractFormulaContent(doc);
     let debugOutput = doc.getElementById('debugOutput');
