@@ -1244,7 +1244,7 @@ async function retrieveDebugLogBody( hostArg, sessionIdArg, apexLogId, runId = n
     }
 }
 
-function parseApexLog(apexLog, runId = null, doc = null) {
+function parseApexLogAndDisplayResults(apexLog, runId = null, doc = null) {
     const logLines = apexLog.split('\n');
     const pipe = '&#124;';
     const marker = 'SFDBG' + pipe;
@@ -1378,7 +1378,7 @@ class ToolingAPIHandler {
         try {
             const response = await fetch(endpoint, request);
             const apexLog = await response.text();
-            return parseApexLog(apexLog, runId, doc);
+            return parseApexLogAndDisplayResults(apexLog, runId, doc);
         } catch (err) {
             console.error('Network or parsing error:', err);
         }
