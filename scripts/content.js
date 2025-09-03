@@ -1204,6 +1204,7 @@ class FormulaUI {
             }
 
             const ast = FormulaEngine.parse(formula.trim());
+            FormulaUI.toMermaid(ast);
             // annotate AST with inferred result types
             FormulaEngine.annotateTypes(ast);
 
@@ -1212,6 +1213,63 @@ class FormulaUI {
         } catch (error) {
             debugOutput.innerHTML = `<div style="color: red; padding: 10px; background: #ffe8e8; border: 1px solid #f44336; border-radius: 4px;">\n            <strong>Formula Analysis Error:</strong><br>${error.message}\n        </div>`;
         }
+    }
+
+    // Converts an AST to a Mermaid diagram and logs it for easy copy/paste
+    // Example usage: FormulaUI.toMermaid(ast) -> logs a ```mermaid fenced block
+    static toMermaid(ast, { fenced = true } = {}) {
+        const lines = ['graph LR'];
+        let counter = 0;
+        const newId = () => `n${++counter}`;
+        const esc = (s) => String(s)
+            .replace(/\\/g, '\\\\')
+            .replace(/"/g, '\\"')
+            .replace(/\n/g, '\\n');
+
+        const renderLabel = (node) => {
+            const rt = node && node.resultType ? ` : ${node.resultType}` : '';
+            switch (node.type) {
+                case 'Function':
+                    return `${node.name}()${rt}`;
+                case 'Operator':
+                    return `${node.operator}${rt}`;
+                case 'Field':
+                    return `${node.name}${rt}`;
+                case 'Literal': {
+                    let v = node.value;
+                    if (v === null) v = 'null';
+                    else if (v instanceof Date) v = v.toISOString();
+                    else if (typeof v === 'string') v = `"${v}"`;
+                    return `${v}${rt}`;
+                }
+                default:
+                    return `Unknown`;
+            }
+        };
+
+        const walk = (node) => {
+            if (!node) return null;
+            const id = newId();
+            lines.push(`${id}["${esc(renderLabel(node))}"]`);
+            if (node.type === 'Function') {
+                for (const arg of node.arguments || []) {
+                    const cid = walk(arg);
+                    if (cid) lines.push(`${id} --> ${cid}`);
+                }
+            } else if (node.type === 'Operator') {
+                const l = walk(node.left);
+                const r = walk(node.right);
+                if (l) lines.push(`${id} --> ${l}`);
+                if (r) lines.push(`${id} --> ${r}`);
+            }
+            return id;
+        };
+
+        if (ast) walk(ast);
+        const mermaid = lines.join('\n');
+        const output = fenced ? `\n\n\`\`\`mermaid\n${mermaid}\n\`\`\`\n` : mermaid;
+        try { console.log(output); } catch (_) { /* noop in tests */ }
+        return mermaid;
     }
 
     // Reads formula text from the standard Salesforce editor textarea
