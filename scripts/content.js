@@ -1223,7 +1223,7 @@ class FormulaUI {
         const newId = () => `n${++counter}`;
         const esc = (s) => String(s)
             .replace(/\\/g, '\\\\')
-            .replace(/"/g, '\\"')
+            .replace(/"/g, '\'')
             .replace(/\n/g, '\\n');
 
         const renderLabel = (node) => {
@@ -1239,7 +1239,7 @@ class FormulaUI {
                     let v = node.value;
                     if (v === null) v = 'null';
                     else if (v instanceof Date) v = v.toISOString();
-                    else if (typeof v === 'string') v = `"${v}"`;
+                    else if (typeof v === 'string') v = `${v}`;
                     return `${v}${rt}`;
                 }
                 default:
