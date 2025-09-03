@@ -1,7 +1,19 @@
 const GETHOSTANDSESSION = "getHostSession";
 const TOOLING_API_VERSION = 'v57.0';
 
-// UIBootstrap groups URL checks, DOM waits, and UI injection
+// UIBootstrap
+//
+// Small helper that decides when the Formula Debugger UI should be injected
+// into the Salesforce formula editor page and wires the Run button to the
+// debugging flow. It safely no-ops when running under Node (tests) where no
+// `window`/`document` are available.
+//
+// Constructor options (all optional, mainly for tests):
+// - doc: Document to operate on (defaults to window.document)
+// - win: Window for location checks (defaults to window)
+// - chromeRuntime: chrome.runtime for background messaging
+// - onRunDebug: callback invoked after host/session are fetched
+
 class UIBootstrap {
     constructor({ doc = (typeof window !== 'undefined' ? window.document : null),
                   win = (typeof window !== 'undefined' ? window : null),
@@ -14,11 +26,13 @@ class UIBootstrap {
         this._mounted = false;
     }
 
+    // Returns true when the current URL looks like the formula editor
     locationMatchesFormulaEditor() {
         try { return this.win && this.win.location && this.win.location.href.includes('/e?'); }
         catch { return false; }
     }
 
+    // Entry point — waits for the editor element and injects the UI once
     init() {
         if (!this.doc || !this.win || !this.locationMatchesFormulaEditor()) return;
         if (this.win === this.win.top) {
@@ -28,6 +42,10 @@ class UIBootstrap {
         }
     }
 
+    //
+    // Observes DOM mutations until an element with the given id exists,
+    // then invokes the provided callback exactly once.
+    //
     waitForElement(elementId, callback) {
         const element = this.doc.getElementById(elementId);
         if (element) { callback(); return; }
@@ -39,6 +57,10 @@ class UIBootstrap {
         observer.observe(this.doc, { childList: true, subtree: true });
     }
 
+    //
+    // Polls for the formula textarea from the top window. This avoids
+    // cross-origin iframe access while still discovering the target element.
+    //
     waitForIframeAndElement() {
         const checkForElement = () => {
             // Check in main document first
@@ -50,6 +72,11 @@ class UIBootstrap {
         checkForElement();
     }
 
+    //
+    // Asks the extension background for the current org host + session id so
+    // Tooling API calls can be made later. Safe to call when chrome.runtime
+    // is unavailable (e.g., during tests).
+    //
     async fetchHostAndSession() {
         if (!this.chromeRuntime) return;
         return new Promise(resolve => {
@@ -62,6 +89,10 @@ class UIBootstrap {
         });
     }
 
+    //
+    // Mounts the Formula Debugger controls next to the formula textarea,
+    // wiring the Run button to fetch host/session and kick off parsing.
+    //
     injectUI() {
         if (this._mounted) return;
         const formulaTextarea = this.doc.getElementById('CalculatedFormula');
@@ -131,6 +162,16 @@ function extractFormulaContent(doc) {
 }
 
 class Tokenizer {
+    //
+    // Tokenizer
+    //
+    // Lightweight regex-based tokenizer for Salesforce formulas. Produces a
+    // stream of tokens with `tokenType` and `token` fields. It tracks
+    // parentheses balance to surface helpful error messages.
+    //
+    // Note: Whitespace and comment tokens are generated but filtered out by
+    // the Parser before parsing begins.
+    //
     static TOKEN_PATTERNS = [
         [ /^\s+/, 'WHITESPACE' ],
         [ /^"[^"]*"/, 'DOUBLE_QUOTE_STRING' ],
@@ -156,16 +197,23 @@ class Tokenizer {
         [ /^[a-zA-Z_]\w*/, 'IDENTIFIER' ]
     ];
 
+    // Resets internal state to begin tokenizing the provided expression
     initialize(inputString) {
         this._expression = inputString;
         this._currentPos = 0;
         this._parenStack = [];
     }
 
+    // True when more tokens can be produced
     hasMoreTokens() {
         return this._currentPos < this._expression.length;
     }
 
+    //
+    // Returns the next token object or null when input is exhausted.
+    // Throws with position context on unexpected characters or unbalanced
+    // closing parenthesis.
+    //
     getNextToken() {
         if (!this.hasMoreTokens()) {
             return null;
@@ -199,6 +247,7 @@ class Tokenizer {
         throw new Error(`Unexpected character at position ${pos}: '${remainingPart[0]}'. Near: '${expressionSnippet}'`);
     }
 
+    // Matches a single token pattern at the beginning of the remaining text
     findMatch(regExpression, remainingPart) {
         const theMatch = remainingPart.match(regExpression);
         if (!theMatch) {
@@ -207,6 +256,7 @@ class Tokenizer {
         return theMatch[0];
     }
 
+    // Throws if there are any unmatched opening parentheses left
     checkParenthesesBalance() {
         if (this._parenStack.length > 0) {
             const lastOpenPos = this._parenStack[this._parenStack.length - 1] + 1;
@@ -218,6 +268,20 @@ class Tokenizer {
 }
 
 class Parser {
+    //
+    // Parser
+    //
+    // Simple recursive-descent parser for a useful subset of Salesforce
+    // formula syntax. It handles literals, identifiers (fields), function
+    // calls, parentheses, arithmetic (+ - * /), logical (&& ||), and
+    // comparison operators (= != <> < > <= >=).
+    //
+    // Produces an AST with nodes of shape:
+    // - { type: 'Literal', value: any }
+    // - { type: 'Field', name: string }
+    // - { type: 'Function', name: string, arguments: AST[] }
+    // - { type: 'Operator', operator: string, left: AST, right: AST }
+    //
     constructor() {
         this._string = '';
         this._tokenizer = new Tokenizer();
@@ -225,6 +289,7 @@ class Parser {
         this._currentIndex = 0;
     }
 
+    // Tokenizes input, filters trivia, checks parens, returns parsed AST
     parse(string) {
         this._string = string;
         this._tokenizer.initialize(this._string);
@@ -245,10 +310,15 @@ class Parser {
         return this.parseExpression();
     }
 
+    // Returns the current token without consuming it (or null)
     peek() {
         return this._currentIndex < this._tokens.length ? this._tokens[this._currentIndex] : null;
     }
 
+    //
+    // Consumes and returns the current token. When expectedType is provided,
+    // throws if the token type does not match.
+    //
     consume(expectedType = null) {
         const token = this.peek();
         if (!token) {
@@ -261,6 +331,7 @@ class Parser {
         return token;
     }
 
+    // Lowest-precedence parse: handles logical AND/OR
     parseExpression() {
         let node = this.parseEquality();
         while (this.peek() && (this.peek().token === '&&' || this.peek().token === '||')) {
@@ -271,6 +342,7 @@ class Parser {
         return node;
     }
 
+    // Next level: comparison operators (= != <> < > <= >=)
     parseEquality() {
         let node = this.parseTerm();
         while (this.peek() && (
@@ -289,6 +361,7 @@ class Parser {
         return node;
     }
 
+    // Addition/subtraction level
     parseTerm() {
         let node = this.parseFactor();
         while (this.peek() && (this.peek().token === '+' || this.peek().token === '-')) {
@@ -299,6 +372,7 @@ class Parser {
         return node;
     }
 
+    // Multiplication/division level
     parseFactor() {
         let node = this.parsePrimary();
         while (this.peek() && (this.peek().token === '*' || this.peek().token === '/')) {
@@ -309,6 +383,7 @@ class Parser {
         return node;
     }
 
+    // Literals, fields, function calls, and parenthesized expressions
     parsePrimary() {
         const token = this.peek();
         if (!token) {
@@ -1191,6 +1266,15 @@ function getVariableValues(ast, doc) {
     return values;
 }
 
+// ToolingAPIHandler
+//
+// Thin wrapper around Salesforce Tooling API endpoints that this extension
+// needs to drive Anonymous Apex execution and correlate debug logs back to
+// UI steps. Responsibilities:
+// - Ensure a DebugLevel + TraceFlag exist for the current user
+// - Execute Anonymous Apex with the provided source
+// - Retrieve the most recent Apex log body
+// - Parse SFDBG-delimited USER_DEBUG lines and display results
 class ToolingAPIHandler {
     constructor(host, sessionId, apiVersion = TOOLING_API_VERSION) {
         this.host = host;
@@ -1198,6 +1282,28 @@ class ToolingAPIHandler {
         this.apiVersion = apiVersion;
     }
 
+    //
+    // Builds a fully-qualified endpoint and standard request with auth headers.
+    // Pass a suffix like '/tooling/query/?q=...' and optional options:
+    //  - method: HTTP method (default 'GET')
+    //  - json: object to JSON.stringify into the request body
+    //
+    buildRequest(suffix, { method = 'GET', json = null } = {}) {
+        const base = `https://${this.host}/services/data/${this.apiVersion}`;
+        const normalized = suffix.startsWith('/') ? suffix : `/${suffix}`;
+        const endpoint = `${base}${normalized}`;
+        const headers = {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${this.sessionId}`
+        };
+        const request = { method, headers };
+        if (json !== null && json !== undefined) {
+            request.body = JSON.stringify(json);
+        }
+        return { endpoint, request };
+    }
+
+    // Encodes Apex for inclusion in a GET querystring
     encodeAnonymous(anonymousApex) {
         return encodeURI(anonymousApex)
             .replaceAll('(', '%28')
@@ -1206,6 +1312,11 @@ class ToolingAPIHandler {
             .replaceAll('+', '%2B');
     }
 
+    //
+    // Runs Anonymous Apex via Tooling API, waits briefly for the log, and
+    // then attempts to retrieve and display the correlated results.
+    // Returns truthy when results are displayed, null/false otherwise.
+    //
     async executeAnonymous(anonymousApex, runId = null, doc = null) {
         // Ensure there is an active TraceFlag for the current user
         try {
@@ -1213,14 +1324,7 @@ class ToolingAPIHandler {
         } catch (e) {
             console.warn('Could not ensure TraceFlag:', e);
         }
-        const endpoint = `https://${this.host}/services/data/${this.apiVersion}/tooling/executeAnonymous/?anonymousBody=${this.encodeAnonymous(anonymousApex)}`;
-        const request = {
-            method: 'GET',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${this.sessionId}`
-            }
-        };
+        const { endpoint, request } = this.buildRequest(`/tooling/executeAnonymous/?anonymousBody=${this.encodeAnonymous(anonymousApex)}`);
 
         try {
             const response = await fetch(endpoint, request);
@@ -1246,6 +1350,7 @@ class ToolingAPIHandler {
         return null;
     }
 
+    // Ensures a valid TraceFlag exists for the current user for ~5 minutes
     async ensureActiveTraceFlag() {
         const userId = await this.getCurrentUserId();
         if (!userId) return false;
@@ -1253,10 +1358,9 @@ class ToolingAPIHandler {
         // Check for existing active TraceFlag
         const now = new Date();
         const q = encodeURIComponent(`SELECT Id, StartDate, ExpirationDate, DebugLevelId FROM TraceFlag WHERE TracedEntityId='${userId}' ORDER BY ExpirationDate DESC`);
-        const tfEndpoint = `https://${this.host}/services/data/${this.apiVersion}/tooling/query/?q=${q}`;
-        const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.sessionId}` };
+        const { endpoint: tfEndpoint, request: tfRequest } = this.buildRequest(`/tooling/query/?q=${q}`);
         try {
-            const resp = await fetch(tfEndpoint, { method: 'GET', headers });
+            const resp = await fetch(tfEndpoint, tfRequest);
             const data = await resp.json();
             if (data && data.records && data.records.length) {
                 const active = data.records.find(r => {
@@ -1284,9 +1388,9 @@ class ToolingAPIHandler {
             StartDate: start.toISOString(),
             ExpirationDate: exp.toISOString()
         };
-        const createEndpoint = `https://${this.host}/services/data/${this.apiVersion}/tooling/sobjects/TraceFlag`;
+        const { endpoint: createEndpoint, request: createRequest } = this.buildRequest('/tooling/sobjects/TraceFlag', { method: 'POST', json: body });
         try {
-            const createResp = await fetch(createEndpoint, { method: 'POST', headers, body: JSON.stringify(body) });
+            const createResp = await fetch(createEndpoint, createRequest);
             const res = await createResp.json();
             if (res && res.success) return true;
             // Some orgs return id without success; treat as ok
@@ -1298,13 +1402,13 @@ class ToolingAPIHandler {
         return false;
     }
 
+    // Finds or creates the DebugLevel used by this extension
     async ensureDebugLevel() {
         const name = 'SFFormulaDebug';
-        const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.sessionId}` };
         const q = encodeURIComponent(`SELECT Id FROM DebugLevel WHERE DeveloperName='${name}'`);
-        const dlEndpoint = `https://${this.host}/services/data/${this.apiVersion}/tooling/query/?q=${q}`;
+        const { endpoint: dlEndpoint, request: dlRequest } = this.buildRequest(`/tooling/query/?q=${q}`);
         try {
-            const resp = await fetch(dlEndpoint, { method: 'GET', headers });
+            const resp = await fetch(dlEndpoint, dlRequest);
             const data = await resp.json();
             if (data && data.records && data.records.length) {
                 return data.records[0].Id;
@@ -1314,7 +1418,6 @@ class ToolingAPIHandler {
         }
 
         // Create DebugLevel
-        const createEndpoint = `https://${this.host}/services/data/${this.apiVersion}/tooling/sobjects/DebugLevel`;
         const body = {
             DeveloperName: name,
             MasterLabel: name,
@@ -1328,7 +1431,8 @@ class ToolingAPIHandler {
             Workflow: 'INFO'
         };
         try {
-            const resp = await fetch(createEndpoint, { method: 'POST', headers, body: JSON.stringify(body) });
+            const { endpoint: createEndpoint, request: createRequest } = this.buildRequest('/tooling/sobjects/DebugLevel', { method: 'POST', json: body });
+            const resp = await fetch(createEndpoint, createRequest);
             const data = await resp.json();
             if (data && data.id) return data.id;
         } catch (e) {
@@ -1337,11 +1441,11 @@ class ToolingAPIHandler {
         return null;
     }
 
+    // Returns the current user's Id via Chatter users/me
     async getCurrentUserId() {
-        const endpoint = `https://${this.host}/services/data/${this.apiVersion}/chatter/users/me`;
-        const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.sessionId}` };
+        const { endpoint, request } = this.buildRequest('/chatter/users/me');
         try {
-            const resp = await fetch(endpoint, { method: 'GET', headers });
+            const resp = await fetch(endpoint, request);
             const data = await resp.json();
             // Chatter users/me includes id
             if (data && data.id) return data.id;
@@ -1351,15 +1455,9 @@ class ToolingAPIHandler {
         return null;
     }
 
+    // Queries the most recent ApexLog id and fetches its body
     async retrieveDebugLogId(runId = null, doc = null) {
-        const endpoint = `https://${this.host}/services/data/${this.apiVersion}/tooling/query/?q=SELECT Id FROM ApexLog WHERE LogLength > 10000 ORDER BY StartTime DESC LIMIT 1`;
-        const request = {
-            method: 'GET',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${this.sessionId}`
-            }
-        };
+        const { endpoint, request } = this.buildRequest('/tooling/query/?q=SELECT Id FROM ApexLog WHERE LogLength > 10000 ORDER BY StartTime DESC LIMIT 1');
 
         try {
             const response = await fetch(endpoint, request);
@@ -1381,15 +1479,9 @@ class ToolingAPIHandler {
         return null;
     }
 
+    // Downloads a log body by id, parses markers, and updates the UI
     async retrieveDebugLogBody(apexLogId, runId = null, doc = null) {
-        const endpoint = `https://${this.host}/services/data/${this.apiVersion}/tooling/sobjects/ApexLog/${apexLogId}/Body`;
-        const request = {
-            method: 'GET',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${this.sessionId}`
-            }
-        };
+        const { endpoint, request } = this.buildRequest(`/tooling/sobjects/ApexLog/${apexLogId}/Body`);
 
         try {
             const response = await fetch(endpoint, request);
@@ -1404,7 +1496,11 @@ class ToolingAPIHandler {
         return null;
     }
 
-    // Parse Apex log and extract SFDBG results and fallback message
+    //
+    // Parses a full Apex log string and extracts SFDBG-delimited results.
+    // The payload format is: SFDBG|<runId>|<stepIndex>|<value>
+    // Returns { matches: {rid, stepIndex, value}[], fallback: string|null }.
+    //
     parseApexLog(apexLog, runId = null) {
         const logLines = apexLog.split('\n');
         const pipe = '&#124;';
