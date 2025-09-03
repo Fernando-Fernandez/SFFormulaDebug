@@ -1213,105 +1213,43 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function calculateFormulaViaAnonymousApex( anonymousApex, runId = null, doc = document ) {
-    // TODO:  before executing Apex, check that there is a TraceFlag (with LogType, ExpirationDate, DebugLevelId) enabled
-    // TODO:  if not, insert one via Tooling API
-    let encodedApex = encodeURI( anonymousApex ).replaceAll('(', '%28').replaceAll(')', '%29')
-                        .replaceAll(';', '%3B').replaceAll('+', '%2B');
-    let endpoint = "https://" + host +  "/services/data/" + TOOLING_API_VERSION + "/tooling/executeAnonymous/?anonymousBody=" + encodedApex;
-    let request = {
-        method: "GET"
-        , headers: {
-          "Content-Type": "application/json"
-          , "Authorization": "Bearer " + sessionId
-        }
-    };
-
+async function calculateFormulaViaAnonymousApex( anonymousApex, runId = null, doc = null ) {
+    // Delegate to ToolingAPIHandler using the current host/sessionId
     try {
-        const response = await fetch(endpoint, request);
-        const data = await response.json();
-
-        if (Array.isArray(data) && data[0].errorCode) {
-            console.error("Could not execute Anonymous Apex: " + data[0].message);
-            return;
-        }
-
-        if (!data.success) {
-            console.error("Apex execution failed: " + data.compileProblem);
-            console.error("Apex execution stack: " + data.exceptionStackTrace);
-            console.error("Apex execution exception: " + data.exceptionMessage);
-            return;
-        }
-
-        await sleep(750); // wait a bit to ensure log is ready
-
-        // only reached if successful
-        return retrieveDebugLogId(host, sessionId, runId, doc);
+        const handler = new ToolingAPIHandler(host, sessionId, TOOLING_API_VERSION);
+        return await handler.executeAnonymous(anonymousApex, runId, doc);
     } catch (err) {
-        console.error("Network or parsing error:", err);
+        console.error("ToolingAPIHandler error:", err);
+        return null;
     }
-    return null;
 }
 
-async function retrieveDebugLogId( host, sessionId, runId = null, doc = document ) {
-    // filter by logLength to avoid tiny logs from setup UI
-    let endpoint = "https://" + host +  "/services/data/" + TOOLING_API_VERSION + "/tooling/query/?q=SELECT Id FROM ApexLog WHERE LogLength > 10000 ORDER BY StartTime DESC LIMIT 1";
-    let request = {
-        method: "GET"
-        , headers: {
-          "Content-Type": "application/json"
-          , "Authorization": "Bearer " + sessionId
-        }
-    };
-
+async function retrieveDebugLogId( hostArg, sessionIdArg, runId = null, doc = null ) {
     try {
-        const response = await fetch(endpoint, request);
-        const data = await response.json();
-
-        if( Array.isArray( data ) && data[0].errorCode ) {
-            console.error( "Could not find Apex Log: " + data[0].message );
-            return;
-        }
-        if( !data.records || data.records.length == 0 ) {
-            console.error( "No Apex logs found" );
-            return;
-        }
-
-        return retrieveDebugLogBody( host, sessionId, data.records[0].Id, runId, doc );
-
+        const handler = new ToolingAPIHandler(hostArg, sessionIdArg, TOOLING_API_VERSION);
+        return await handler.retrieveDebugLogId(runId, doc);
     } catch (err) {
-        console.error("Network or parsing error:", err);
+        console.error("ToolingAPIHandler error:", err);
+        return null;
     }
-    return null;
 }
 
-async function retrieveDebugLogBody( host, sessionId, apexLogId, runId = null, doc = document ) {
-    let endpoint = "https://" + host +  "/services/data/" + TOOLING_API_VERSION + "/tooling/sobjects/ApexLog/" + apexLogId + "/Body";
-    let request = {
-        method: "GET"
-        , headers: {
-          "Content-Type": "application/json"
-          , "Authorization": "Bearer " + sessionId
-        }
-    };
-
+async function retrieveDebugLogBody( hostArg, sessionIdArg, apexLogId, runId = null, doc = null ) {
     try {
-        const response = await fetch(endpoint, request);
-        const data = await response.text();
-
-        return parseApexLog( data, runId, doc );
-
+        const handler = new ToolingAPIHandler(hostArg, sessionIdArg, TOOLING_API_VERSION);
+        return await handler.retrieveDebugLogBody(apexLogId, runId, doc);
     } catch (err) {
-        console.error("Network or parsing error:", err);
+        console.error("ToolingAPIHandler error:", err);
+        return null;
     }
-    return null;
 }
 
-function parseApexLog(apexLog, runId = null, doc = document) {
+function parseApexLog(apexLog, runId = null, doc = null) {
     const logLines = apexLog.split('\n');
     const pipe = '&#124;';
     const marker = 'SFDBG' + pipe;
     let matched = false;
+    const ctxDoc = doc || (typeof document !== 'undefined' ? document : null);
 
     for (let line of logLines) {
         if (line.includes('USER_DEBUG') && line.includes(marker)) {
@@ -1324,9 +1262,9 @@ function parseApexLog(apexLog, runId = null, doc = document) {
                 const rid = parts[0];
                 const stepIndex = parts[1];
                 const value = parts.slice(2).join(pipe);
-                if (!runId || rid === runId) {
+                if ((!runId || rid === runId) && ctxDoc) {
                     const elId = `step-result-${rid}-${stepIndex}`;
-                    const el = doc.getElementById(elId);
+                    const el = ctxDoc.getElementById(elId);
                     if (el) {
                         el.textContent = `= ${value}`;
                         matched = true;
@@ -1348,8 +1286,108 @@ function parseApexLog(apexLog, runId = null, doc = document) {
     }
 }
 
+class ToolingAPIHandler {
+    constructor(host, sessionId, apiVersion = TOOLING_API_VERSION) {
+        this.host = host;
+        this.sessionId = sessionId;
+        this.apiVersion = apiVersion;
+    }
+
+    encodeAnonymous(anonymousApex) {
+        return encodeURI(anonymousApex)
+            .replaceAll('(', '%28')
+            .replaceAll(')', '%29')
+            .replaceAll(';', '%3B')
+            .replaceAll('+', '%2B');
+    }
+
+    async executeAnonymous(anonymousApex, runId = null, doc = null) {
+        const endpoint = `https://${this.host}/services/data/${this.apiVersion}/tooling/executeAnonymous/?anonymousBody=${this.encodeAnonymous(anonymousApex)}`;
+        const request = {
+            method: 'GET',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${this.sessionId}`
+            }
+        };
+
+        try {
+            const response = await fetch(endpoint, request);
+            const data = await response.json();
+
+            if (Array.isArray(data) && data[0].errorCode) {
+                console.error('Could not execute Anonymous Apex: ' + data[0].message);
+                return null;
+            }
+
+            if (!data.success) {
+                console.error('Apex execution failed: ' + data.compileProblem);
+                console.error('Apex execution stack: ' + data.exceptionStackTrace);
+                console.error('Apex execution exception: ' + data.exceptionMessage);
+                return null;
+            }
+
+            await sleep(750);
+            return this.retrieveDebugLogId(runId, doc);
+        } catch (err) {
+            console.error('Network or parsing error:', err);
+        }
+        return null;
+    }
+
+    async retrieveDebugLogId(runId = null, doc = null) {
+        const endpoint = `https://${this.host}/services/data/${this.apiVersion}/tooling/query/?q=SELECT Id FROM ApexLog WHERE LogLength > 10000 ORDER BY StartTime DESC LIMIT 1`;
+        const request = {
+            method: 'GET',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${this.sessionId}`
+            }
+        };
+
+        try {
+            const response = await fetch(endpoint, request);
+            const data = await response.json();
+
+            if (Array.isArray(data) && data[0].errorCode) {
+                console.error('Could not find Apex Log: ' + data[0].message);
+                return null;
+            }
+            if (!data.records || data.records.length == 0) {
+                console.error('No Apex logs found');
+                return null;
+            }
+
+            return this.retrieveDebugLogBody(data.records[0].Id, runId, doc);
+        } catch (err) {
+            console.error('Network or parsing error:', err);
+        }
+        return null;
+    }
+
+    async retrieveDebugLogBody(apexLogId, runId = null, doc = null) {
+        const endpoint = `https://${this.host}/services/data/${this.apiVersion}/tooling/sobjects/ApexLog/${apexLogId}/Body`;
+        const request = {
+            method: 'GET',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${this.sessionId}`
+            }
+        };
+
+        try {
+            const response = await fetch(endpoint, request);
+            const apexLog = await response.text();
+            return parseApexLog(apexLog, runId, doc);
+        } catch (err) {
+            console.error('Network or parsing error:', err);
+        }
+        return null;
+    }
+}
+
 
 // Export for Node.js tests (without affecting browser usage)
 if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { Tokenizer, Parser };
+    module.exports = { Tokenizer, Parser, ToolingAPIHandler };
 }
