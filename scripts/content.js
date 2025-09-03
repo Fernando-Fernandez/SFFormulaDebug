@@ -1,6 +1,11 @@
 const GETHOSTANDSESSION = "getHostSession";
 const TOOLING_API_VERSION = 'v57.0';
 
+// TODO:  show field input elements in 2 columns
+// TODO:  add formula step results on each node of the Mermaid diagram
+// TODO:  omit result type from Mermaid diagram
+// TODO:  handle formulas in flow context (different URL)
+
 var host, sessionId;
 
 // UIBootstrap
@@ -1204,7 +1209,7 @@ class FormulaUI {
             }
 
             const ast = FormulaEngine.parse(formula.trim());
-            FormulaUI.toMermaid(ast);
+
             // annotate AST with inferred result types
             FormulaEngine.annotateTypes(ast);
 
@@ -1229,10 +1234,14 @@ class FormulaUI {
         const renderLabel = (node) => {
             const rt = node && node.resultType ? ` : ${node.resultType}` : '';
             switch (node.type) {
-                case 'Function':
-                    return `${node.name}()${rt}`;
-                case 'Operator':
-                    return `${node.operator}${rt}`;
+                case 'Function': {
+                    const expr = FormulaEngine.rebuild(node);
+                    return `${expr}${rt}`;
+                }
+                case 'Operator': {
+                    const expr = FormulaEngine.rebuild(node);
+                    return `${expr}${rt}`;
+                }
                 case 'Field':
                     return `${node.name}${rt}`;
                 case 'Literal': {
@@ -1253,14 +1262,20 @@ class FormulaUI {
             lines.push(`${id}["${esc(renderLabel(node))}"]`);
             if (node.type === 'Function') {
                 for (const arg of node.arguments || []) {
-                    const cid = walk(arg);
-                    if (cid) lines.push(`${id} --> ${cid}`);
+                    if (arg && (arg.type === 'Function' || arg.type === 'Operator')) {
+                        const cid = walk(arg);
+                        if (cid) lines.push(`${id} --> ${cid}`);
+                    }
                 }
             } else if (node.type === 'Operator') {
-                const l = walk(node.left);
-                const r = walk(node.right);
-                if (l) lines.push(`${id} --> ${l}`);
-                if (r) lines.push(`${id} --> ${r}`);
+                if (node.left && (node.left.type === 'Function' || node.left.type === 'Operator')) {
+                    const l = walk(node.left);
+                    if (l) lines.push(`${id} --> ${l}`);
+                }
+                if (node.right && (node.right.type === 'Function' || node.right.type === 'Operator')) {
+                    const r = walk(node.right);
+                    if (r) lines.push(`${id} --> ${r}`);
+                }
             }
             return id;
         };
@@ -1341,9 +1356,16 @@ class FormulaUI {
             const calculateBtn = doc.createElement('button');
             calculateBtn.textContent = 'Calculate Formula';
             calculateBtn.type = 'button';
-            calculateBtn.style.cssText = 'padding: 8px 16px; background: #007cba; color: white; border: none; border-radius: 4px; cursor: pointer; margin-bottom: 15px;';
+            calculateBtn.style.cssText = 'padding: 8px 16px; background: #007cba; color: white; border: none; border-radius: 4px; cursor: pointer;';
             calculateBtn.addEventListener('click', async () => await this.calculateAndDisplay(ast, doc));
             container.appendChild(calculateBtn);
+
+            const mermaidBtn = doc.createElement('button');
+            mermaidBtn.textContent = 'Open Diagram';
+            mermaidBtn.type = 'button';
+            mermaidBtn.style.cssText = 'padding: 8px 16px; background: #555; color: white; border: none; border-radius: 4px; cursor: pointer; margin-left: 8px;';
+            mermaidBtn.addEventListener('click', () => this.openMermaidDiagram(ast));
+            container.appendChild(mermaidBtn);
 
             const apexToggleWrap = doc.createElement('label');
             apexToggleWrap.style.cssText = 'display:inline-flex; align-items:center; gap:6px; margin-left:10px; font-size: 12px;';
@@ -1352,7 +1374,7 @@ class FormulaUI {
             apexToggle.id = 'use-apex-steps';
             apexToggle.title = 'Calculate each step via Anonymous Apex';
             const apexToggleText = doc.createElement('span');
-            apexToggleText.textContent = 'Use Anonymous Apex for steps';
+            apexToggleText.textContent = 'Use Anonymous Apex for steps calculation';
             apexToggleWrap.appendChild(apexToggle);
             apexToggleWrap.appendChild(apexToggleText);
             container.appendChild(apexToggleWrap);
@@ -1364,10 +1386,6 @@ class FormulaUI {
         }
 
         if (steps.length > 0) {
-            const stepsDiv = doc.createElement('div');
-            stepsDiv.innerHTML = `<strong>Calculation Steps (${steps.length}):</strong>`;
-            stepsDiv.style.cssText = 'margin-bottom: 10px;';
-
             const stepsList = doc.createElement('div');
             stepsList.id = 'stepsList';
             stepsList.style.cssText = 'margin-top: 10px;';
@@ -1380,11 +1398,36 @@ class FormulaUI {
                 stepsList.appendChild(stepDiv);
             });
 
-            stepsDiv.appendChild(stepsList);
-            container.appendChild(stepsDiv);
+            container.appendChild(stepsList);
         }
 
         debugOutput.appendChild(container);
+    }
+
+    // Opens the Mermaid diagram in a new tab using mermaid.ink
+    static openMermaidDiagram(ast) {
+        if (!ast) return;
+        try {
+            const mermaid = FormulaUI.toMermaid(ast, { fenced: false });
+            const toB64 = (str) => {
+                // Encode UTF-8 safely before base64
+                try { return btoa(unescape(encodeURIComponent(str))); }
+                catch (_) { return btoa(str); }
+            };
+            const encoded = toB64(mermaid);
+            const url = `https://mermaid.ink/svg/${encoded}`;
+            if (typeof window !== 'undefined' && window.open) {
+                const w = window.open(url, '_blank');
+                if (!w) {
+                    // Popup blocked; log URL as fallback
+                    console.log('Mermaid diagram URL:', url);
+                }
+            } else {
+                console.log('Mermaid diagram URL:', url);
+            }
+        } catch (e) {
+            console.error('Unable to open Mermaid diagram:', e);
+        }
     }
 
     // Calculates the overall formula result and updates per‑step results
