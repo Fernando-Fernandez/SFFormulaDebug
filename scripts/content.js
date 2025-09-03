@@ -149,32 +149,32 @@ function extractFormulaContent(doc) {
     return formulaTextarea ? formulaTextarea.value || 'No formula content found.' : 'Formula editor not found.';
 }
 
-const TOKEN_PATTERNS = [
-    [ /^\s+/, 'WHITESPACE' ],
-    [ /^"[^"]*"/, 'DOUBLE_QUOTE_STRING' ],
-    [ /^\d+/, 'NUMBER' ],
-    [ /^'[^']*'/, 'STRING' ],
-    [ /^\/\/.*/, 'SINGLE_LINE_COMMENT' ],
-    [ /^\/\*[\s\S]*?\*\//, 'MULTI_LINE_COMMENT' ],
-    [ /^[+\-]/, 'ADDITIVE_OPERATOR' ],
-    [ /^[*\/]/, 'MULTIPLICATIVE_OPERATOR' ],
-    [ /^[()]/, 'PARENTHESIS' ],
-    [ /^[{}]/, 'BRACES' ],
-    [ /^,/, 'COMMA' ],
-    [ /^&&/, 'AND' ],
-    [ /^\|\|/, 'OR' ],
-    [ /^=/, 'EQUAL' ],
-    [ /^!=/, 'NOT_EQUAL' ],
-    [ /^<>/, 'NOT_EQUAL' ],
-    [ /^<=/, 'LESS_THAN_OR_EQUAL' ],
-    [ /^>=/, 'GREATER_THAN_OR_EQUAL' ],
-    [ /^</, 'LESS_THAN' ],
-    [ /^>/, 'GREATER_THAN' ],
-    [ /^NULL\b/i, 'NULL' ],
-    [ /^[a-zA-Z_]\w*/, 'IDENTIFIER' ]
-];
-
 class Tokenizer {
+    static TOKEN_PATTERNS = [
+        [ /^\s+/, 'WHITESPACE' ],
+        [ /^"[^"]*"/, 'DOUBLE_QUOTE_STRING' ],
+        [ /^\d+/, 'NUMBER' ],
+        [ /^'[^']*'/, 'STRING' ],
+        [ /^\/\/.*/, 'SINGLE_LINE_COMMENT' ],
+        [ /^\/\*[\s\S]*?\*\//, 'MULTI_LINE_COMMENT' ],
+        [ /^[+\-]/, 'ADDITIVE_OPERATOR' ],
+        [ /^[*\/]/, 'MULTIPLICATIVE_OPERATOR' ],
+        [ /^[()]/, 'PARENTHESIS' ],
+        [ /^[{}]/, 'BRACES' ],
+        [ /^,/, 'COMMA' ],
+        [ /^&&/, 'AND' ],
+        [ /^\|\|/, 'OR' ],
+        [ /^=/, 'EQUAL' ],
+        [ /^!=/, 'NOT_EQUAL' ],
+        [ /^<>/, 'NOT_EQUAL' ],
+        [ /^<=/, 'LESS_THAN_OR_EQUAL' ],
+        [ /^>=/, 'GREATER_THAN_OR_EQUAL' ],
+        [ /^</, 'LESS_THAN' ],
+        [ /^>/, 'GREATER_THAN' ],
+        [ /^NULL\b/i, 'NULL' ],
+        [ /^[a-zA-Z_]\w*/, 'IDENTIFIER' ]
+    ];
+
     initialize(inputString) {
         this._expression = inputString;
         this._currentPos = 0;
@@ -192,7 +192,7 @@ class Tokenizer {
 
         const remainingPart = this._expression.slice(this._currentPos);
 
-        for (const [regExpression, tokenType] of TOKEN_PATTERNS) {
+        for (const [regExpression, tokenType] of Tokenizer.TOKEN_PATTERNS) {
             const token = this.findMatch(regExpression, remainingPart);
             if (token != null) {
                 const tokenStartPos = this._currentPos;
@@ -436,51 +436,6 @@ function unifyTypes(a, b) {
     return RESULT_TYPE.Unknown;
 }
 
-function functionReturnType(name, argTypes) {
-    const n = name.toUpperCase();
-    switch (n) {
-        case 'IF':
-            // IF(condition:Boolean, then:X, else:X) => X (unify then/else)
-            return unifyTypes(argTypes[1], argTypes[2]);
-        case 'CONTAINS':
-            return RESULT_TYPE.Boolean;
-        case 'FIND':
-            return RESULT_TYPE.Number;
-        case 'MID':
-            return RESULT_TYPE.Text;
-        case 'FLOOR':
-            return RESULT_TYPE.Number;
-        case 'CASE':
-            // CASE(expression, val1,res1, ..., default) => unify of results
-            if (argTypes.length >= 3) {
-                let t = RESULT_TYPE.Unknown;
-                for (let i = 2; i < argTypes.length; i += 2) {
-                    t = unifyTypes(t, argTypes[i]);
-                }
-                // default at the end if odd count after expression
-                if ((argTypes.length - 1) % 2 === 1) {
-                    t = unifyTypes(t, argTypes[argTypes.length - 1]);
-                }
-                return t;
-            }
-            return RESULT_TYPE.Unknown;
-        case 'AND':
-        case 'OR':
-        case 'NOT':
-        case 'ISPICKVAL':
-        case 'ISBLANK':
-            return RESULT_TYPE.Boolean;
-        case 'NOW':
-            return RESULT_TYPE.DateTime;
-        case 'DATE':
-            return RESULT_TYPE.Date;
-        case 'DATEVALUE':
-            return RESULT_TYPE.Date;
-        default:
-            return RESULT_TYPE.Unknown;
-    }
-}
-
 // Annotate AST nodes with resultType by static inference and sample inputs
 function annotateTypes(ast, sampleVariables = {}) {
     function infer(node) {
@@ -573,6 +528,51 @@ function annotateTypes(ast, sampleVariables = {}) {
     return ast;
 }
 
+function functionReturnType(name, argTypes) {
+    const n = name.toUpperCase();
+    switch (n) {
+        case 'IF':
+            // IF(condition:Boolean, then:X, else:X) => X (unify then/else)
+            return unifyTypes(argTypes[1], argTypes[2]);
+        case 'CONTAINS':
+            return RESULT_TYPE.Boolean;
+        case 'FIND':
+            return RESULT_TYPE.Number;
+        case 'MID':
+            return RESULT_TYPE.Text;
+        case 'FLOOR':
+            return RESULT_TYPE.Number;
+        case 'CASE':
+            // CASE(expression, val1,res1, ..., default) => unify of results
+            if (argTypes.length >= 3) {
+                let t = RESULT_TYPE.Unknown;
+                for (let i = 2; i < argTypes.length; i += 2) {
+                    t = unifyTypes(t, argTypes[i]);
+                }
+                // default at the end if odd count after expression
+                if ((argTypes.length - 1) % 2 === 1) {
+                    t = unifyTypes(t, argTypes[argTypes.length - 1]);
+                }
+                return t;
+            }
+            return RESULT_TYPE.Unknown;
+        case 'AND':
+        case 'OR':
+        case 'NOT':
+        case 'ISPICKVAL':
+        case 'ISBLANK':
+            return RESULT_TYPE.Boolean;
+        case 'NOW':
+            return RESULT_TYPE.DateTime;
+        case 'DATE':
+            return RESULT_TYPE.Date;
+        case 'DATEVALUE':
+            return RESULT_TYPE.Date;
+        default:
+            return RESULT_TYPE.Unknown;
+    }
+}
+
 function rebuildFormula(ast) {
     if (!ast || !ast.type) return "";
 
@@ -599,41 +599,10 @@ function rebuildFormula(ast) {
     }
 }
 
-function extractCalculationSteps(ast) {
-    const steps = [];
-    const seen = new Set();
-
-    function traverse(node) {
-        if (!node) return;
-
-        switch (node.type) {
-            case "Function":
-                node.arguments.forEach(arg => traverse(arg));
-                const expr = rebuildFormula(node);
-                if (!seen.has(expr)) {
-                    seen.add(expr);
-                    steps.push({ expression: expr, node });
-                }
-                break;
-            case "Operator":
-                traverse(node.left);
-                traverse(node.right);
-                const opExpr = rebuildFormula(node);
-                if (!seen.has(opExpr)) {
-                    seen.add(opExpr);
-                    steps.push({ expression: opExpr, node });
-                }
-                break;
-            case "Field":
-            case "Literal":
-                break;
-            default:
-                throw new Error(`Unknown AST node type: ${node.type}`);
-        }
-    }
-
-    traverse(ast);
-    return steps;
+function toDate(value) {
+    if (isDate(value)) return value;
+    if (isDateString(value)) return new Date(value);
+    return null;
 }
 
 function isDate(value) {
@@ -644,19 +613,6 @@ function isDateString(value) {
     if (typeof value !== 'string' || value.trim() === '') return false;
     const date = new Date(value);
     return !isNaN(date.getTime());
-}
-
-function toDate(value) {
-    if (isDate(value)) return value;
-    if (isDateString(value)) return new Date(value);
-    return null;
-}
-
-function toNumber(value) {
-    if (typeof value === 'number') return value;
-    if (isDate(value)) return value.getTime();
-    const num = parseFloat(value);
-    return isNaN(num) ? 0 : num;
 }
 
 function calculateFormula(ast, variables = {}) {
@@ -890,16 +846,6 @@ function calculateFormula(ast, variables = {}) {
     }
 }
 
-function getVariableValues(ast, doc) {
-    const variables = extractVariables(ast);
-    const values = {};
-    variables.forEach(variable => {
-        const input = doc.getElementById(`var-${variable}`);
-        values[variable] = input ? (input.value || "") : "";
-    });
-    return values;
-}
-
 function displayDataStructure(ast, doc) {
     const debugOutput = doc.getElementById('debugOutput');
     if (!debugOutput) return;
@@ -1012,6 +958,141 @@ function displayDataStructure(ast, doc) {
     debugOutput.appendChild(container);
 }
 
+async function calculateAndDisplay(ast, doc) {
+    const resultDiv = doc.getElementById('calculationResult');
+    if (!resultDiv) return;
+    
+    try {
+        const variables = getVariableValues(ast, doc);
+        const result = calculateFormula(ast, variables);
+        
+        const displayResult = result === null ? 'null' : 
+                             isDate(result) ? result.toLocaleString() : 
+                             typeof result === 'number' && result % 1 !== 0 ? result.toFixed(6) : result;
+        resultDiv.innerHTML = `<strong>Result:</strong> ${displayResult}`;
+        resultDiv.style.display = 'block';
+        resultDiv.style.background = '#e8f5e8';
+        resultDiv.style.borderColor = '#4caf50';
+        
+        await updateStepsWithCalculation(ast, variables, doc);
+        
+    } catch (error) {
+        resultDiv.innerHTML = `<strong>Error:</strong> ${error.message}`;
+        resultDiv.style.display = 'block';
+        resultDiv.style.background = '#ffe8e8';
+        resultDiv.style.borderColor = '#f44336';
+    }
+}
+
+async function updateStepsWithCalculation(ast, variables, doc) {
+    const stepsList = doc.getElementById('stepsList');
+    if (!stepsList) return;
+    
+    // Re-annotate with types using provided sample values
+    try { annotateTypes(ast, variables); } catch(e) { /* ignore */ }
+
+    const steps = extractCalculationSteps(ast);
+    stepsList.innerHTML = '';
+    const useApex = !!(doc.getElementById('use-apex-steps') && doc.getElementById('use-apex-steps').checked);
+    // Correlate one log to this rendering round
+    let runId = null;
+    if (useApex) {
+        runId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    }
+    
+    // forEach async does not preserve order, so use for..of
+    //steps.forEach( async (step, index) => {
+    for (const [index, step] of steps.entries()) {
+
+        const stepDiv = doc.createElement('div');
+        stepDiv.style.cssText = 'margin: 5px 0; padding: 8px; background: #f9f9f9; border-left: 3px solid #007cba;';
+        
+        const exprDiv = doc.createElement('div');
+        exprDiv.style.cssText = 'font-family: monospace; font-weight: bold;';
+        const t = (step.node && step.node.resultType) ? step.node.resultType : 'Unknown';
+        exprDiv.textContent = `${index + 1}. ${step.expression}  ->  ${t}`;
+        
+        const resultSpan = doc.createElement('div');
+        resultSpan.style.cssText = 'font-family: monospace; color: #007cba; margin-top: 4px;';
+        if (!useApex) {
+            let result;
+            try {
+                result = calculateFormula(step.node, variables);
+            } catch (error) {
+                result = `Error: ${error.message}`;
+            }
+            const displayResult = result === null ? 'null' : 
+                                 isDate(result) ? result.toLocaleString() : 
+                                 typeof result === 'number' && result % 1 !== 0 ? result.toFixed(6) : result;
+            resultSpan.textContent = `= ${displayResult}`;
+        } else {
+            // Placeholder; results filled when log returns
+            const idx = index + 1;
+            resultSpan.id = `step-result-${runId}-${idx}`;
+            resultSpan.textContent = '= …';
+        }
+        
+        stepDiv.appendChild(exprDiv);
+        stepDiv.appendChild(resultSpan);
+        stepsList.appendChild(stepDiv);
+    }
+
+    // Submit a single Anonymous Apex with all steps
+    if (useApex) {
+        try {
+            const anonymousApex = buildAnonymousApexForSteps(steps, ast, doc, runId);
+
+            // Delegate to ToolingAPIHandler using the current host/sessionId
+            try {
+                const handler = new ToolingAPIHandler(host, sessionId, TOOLING_API_VERSION);
+                return await handler.executeAnonymous(anonymousApex, runId, doc);
+            } catch (err) {
+                console.error("ToolingAPIHandler error:", err);
+                return null;
+            }
+        } catch (e) {
+            console.error('Failed to run batched Apex for steps:', e);
+        }
+    }
+}
+
+function extractCalculationSteps(ast) {
+    const steps = [];
+    const seen = new Set();
+
+    function traverse(node) {
+        if (!node) return;
+
+        switch (node.type) {
+            case "Function":
+                node.arguments.forEach(arg => traverse(arg));
+                const expr = rebuildFormula(node);
+                if (!seen.has(expr)) {
+                    seen.add(expr);
+                    steps.push({ expression: expr, node });
+                }
+                break;
+            case "Operator":
+                traverse(node.left);
+                traverse(node.right);
+                const opExpr = rebuildFormula(node);
+                if (!seen.has(opExpr)) {
+                    seen.add(opExpr);
+                    steps.push({ expression: opExpr, node });
+                }
+                break;
+            case "Field":
+            case "Literal":
+                break;
+            default:
+                throw new Error(`Unknown AST node type: ${node.type}`);
+        }
+    }
+
+    traverse(ast);
+    return steps;
+}
+
 // Build a single Anonymous Apex execution that evaluates all steps and logs results
 function buildAnonymousApexForSteps(steps, astRoot, doc, runId) {
     // Builds Anonymous Apex script that evaluates each formula
@@ -1119,145 +1200,14 @@ function buildAnonymousApexForSteps(steps, astRoot, doc, runId) {
     return lines.join('\n');
 }
 
-async function calculateAndDisplay(ast, doc) {
-    const resultDiv = doc.getElementById('calculationResult');
-    if (!resultDiv) return;
-    
-    try {
-        const variables = getVariableValues(ast, doc);
-        const result = calculateFormula(ast, variables);
-        
-        const displayResult = result === null ? 'null' : 
-                             isDate(result) ? result.toLocaleString() : 
-                             typeof result === 'number' && result % 1 !== 0 ? result.toFixed(6) : result;
-        resultDiv.innerHTML = `<strong>Result:</strong> ${displayResult}`;
-        resultDiv.style.display = 'block';
-        resultDiv.style.background = '#e8f5e8';
-        resultDiv.style.borderColor = '#4caf50';
-        
-        await updateStepsWithCalculation(ast, variables, doc);
-        
-    } catch (error) {
-        resultDiv.innerHTML = `<strong>Error:</strong> ${error.message}`;
-        resultDiv.style.display = 'block';
-        resultDiv.style.background = '#ffe8e8';
-        resultDiv.style.borderColor = '#f44336';
-    }
-}
-
-async function updateStepsWithCalculation(ast, variables, doc) {
-    const stepsList = doc.getElementById('stepsList');
-    if (!stepsList) return;
-    
-    // Re-annotate with types using provided sample values
-    try { annotateTypes(ast, variables); } catch(e) { /* ignore */ }
-
-    const steps = extractCalculationSteps(ast);
-    stepsList.innerHTML = '';
-    const useApex = !!(doc.getElementById('use-apex-steps') && doc.getElementById('use-apex-steps').checked);
-    // Correlate one log to this rendering round
-    let runId = null;
-    if (useApex) {
-        runId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    }
-    
-    // forEach async does not preserve order, so use for..of
-    //steps.forEach( async (step, index) => {
-    for (const [index, step] of steps.entries()) {
-
-        const stepDiv = doc.createElement('div');
-        stepDiv.style.cssText = 'margin: 5px 0; padding: 8px; background: #f9f9f9; border-left: 3px solid #007cba;';
-        
-        const exprDiv = doc.createElement('div');
-        exprDiv.style.cssText = 'font-family: monospace; font-weight: bold;';
-        const t = (step.node && step.node.resultType) ? step.node.resultType : 'Unknown';
-        exprDiv.textContent = `${index + 1}. ${step.expression}  ->  ${t}`;
-        
-        const resultSpan = doc.createElement('div');
-        resultSpan.style.cssText = 'font-family: monospace; color: #007cba; margin-top: 4px;';
-        if (!useApex) {
-            let result;
-            try {
-                result = calculateFormula(step.node, variables);
-            } catch (error) {
-                result = `Error: ${error.message}`;
-            }
-            const displayResult = result === null ? 'null' : 
-                                 isDate(result) ? result.toLocaleString() : 
-                                 typeof result === 'number' && result % 1 !== 0 ? result.toFixed(6) : result;
-            resultSpan.textContent = `= ${displayResult}`;
-        } else {
-            // Placeholder; results filled when log returns
-            const idx = index + 1;
-            resultSpan.id = `step-result-${runId}-${idx}`;
-            resultSpan.textContent = '= …';
-        }
-        
-        stepDiv.appendChild(exprDiv);
-        stepDiv.appendChild(resultSpan);
-        stepsList.appendChild(stepDiv);
-    }
-
-    // Submit a single Anonymous Apex with all steps
-    if (useApex) {
-        try {
-            const apex = buildAnonymousApexForSteps(steps, ast, doc, runId);
-            await calculateFormulaViaAnonymousApex(apex, runId, doc);
-        } catch (e) {
-            console.error('Failed to run batched Apex for steps:', e);
-        }
-    }
-}
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-async function calculateFormulaViaAnonymousApex( anonymousApex, runId = null, doc = null ) {
-    // Delegate to ToolingAPIHandler using the current host/sessionId
-    try {
-        const handler = new ToolingAPIHandler(host, sessionId, TOOLING_API_VERSION);
-        return await handler.executeAnonymous(anonymousApex, runId, doc);
-    } catch (err) {
-        console.error("ToolingAPIHandler error:", err);
-        return null;
-    }
-}
-
-async function retrieveDebugLogId( hostArg, sessionIdArg, runId = null, doc = null ) {
-    try {
-        const handler = new ToolingAPIHandler(hostArg, sessionIdArg, TOOLING_API_VERSION);
-        return await handler.retrieveDebugLogId(runId, doc);
-    } catch (err) {
-        console.error("ToolingAPIHandler error:", err);
-        return null;
-    }
-}
-
-async function retrieveDebugLogBody( hostArg, sessionIdArg, apexLogId, runId = null, doc = null ) {
-    try {
-        const handler = new ToolingAPIHandler(hostArg, sessionIdArg, TOOLING_API_VERSION);
-        return await handler.retrieveDebugLogBody(apexLogId, runId, doc);
-    } catch (err) {
-        console.error("ToolingAPIHandler error:", err);
-        return null;
-    }
-}
-
-// Display parsed SFDBG results into the provided document
-function displayParsedResults(parsed, doc) {
-    const ctxDoc = doc || (typeof document !== 'undefined' ? document : null);
-    if (!ctxDoc || !parsed || !parsed.matches) return false;
-    let any = false;
-    for (const { rid, stepIndex, value } of parsed.matches) {
-        const elId = `step-result-${rid}-${stepIndex}`;
-        const el = ctxDoc.getElementById(elId);
-        if (el) {
-            el.textContent = `= ${value}`;
-            any = true;
-        }
-    }
-    return any;
+function getVariableValues(ast, doc) {
+    const variables = extractVariables(ast);
+    const values = {};
+    variables.forEach(variable => {
+        const input = doc.getElementById(`var-${variable}`);
+        values[variable] = input ? (input.value || "") : "";
+    });
+    return values;
 }
 
 class ToolingAPIHandler {
@@ -1510,6 +1460,25 @@ class ToolingAPIHandler {
     }
 }
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// Display parsed SFDBG results into the provided document
+function displayParsedResults(parsed, doc) {
+    const ctxDoc = doc || (typeof document !== 'undefined' ? document : null);
+    if (!ctxDoc || !parsed || !parsed.matches) return false;
+    let any = false;
+    for (const { rid, stepIndex, value } of parsed.matches) {
+        const elId = `step-result-${rid}-${stepIndex}`;
+        const el = ctxDoc.getElementById(elId);
+        if (el) {
+            el.textContent = `= ${value}`;
+            any = true;
+        }
+    }
+    return any;
+}
 
 // Export for Node.js tests (without affecting browser usage)
 if (typeof module !== 'undefined' && module.exports) {
