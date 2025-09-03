@@ -1,6 +1,8 @@
 const GETHOSTANDSESSION = "getHostSession";
 const TOOLING_API_VERSION = 'v57.0';
 
+var host, sessionId;
+
 // UIBootstrap
 //
 // Small helper that decides when the Formula Debugger UI should be injected
@@ -22,7 +24,8 @@ class UIBootstrap {
         this.doc = doc;
         this.win = win;
         this.chromeRuntime = chromeRuntime;
-        this.onRunDebug = onRunDebug || (() => runDebug());
+        // Default action triggers the FormulaUI runner with this document
+        this.onRunDebug = onRunDebug || (() => FormulaUI.run(this.doc));
         this._mounted = false;
     }
 
@@ -116,42 +119,6 @@ class UIBootstrap {
             });
         }
         this._mounted = true;
-    }
-}
-
-// Initialize content script when iframe is loaded (guarded for Node tests)
-if (typeof window !== 'undefined') {
-    const uiBootstrap = new UIBootstrap();
-    uiBootstrap.init();
-}
-
-var host, sessionId;
-
-function runDebug() {
-    let doc = window.document;
-    let formula = FormulaUI.extractFormulaContent(doc);
-    let debugOutput = doc.getElementById('debugOutput');
-    if(!debugOutput) {
-        console.error('Debug output element not found.');
-        return;
-    }
-
-    try {
-        if (!formula || formula.trim() === '') {
-            debugOutput.innerText = 'No formula to analyze';
-            return;
-        }
-
-        const ast = FormulaEngine.parse(formula.trim());
-        // annotate AST with inferred result types
-        FormulaEngine.annotateTypes(ast);
-        
-        FormulaUI.displayDataStructure(ast, doc);
-        
-    } catch (error) {
-        debugOutput.innerHTML = `<div style="color: red; padding: 10px; background: #ffe8e8; border: 1px solid #f44336; border-radius: 4px;">
-            <strong>Formula Analysis Error:</strong><br>${error.message}
-        </div>`;
     }
 }
 
@@ -712,6 +679,21 @@ class ToolingAPIHandler {
     }
 }
 
+//
+// FormulaEngine
+//
+// Pure, stateless helpers for working with Salesforce-style formulas.
+// Responsibilities:
+// - Build an AST from a formula string (via Parser)
+// - Infer/annotate result types for AST nodes
+// - Evaluate ASTs locally with supplied variable values
+// - Rebuild a formula string from an AST
+// - Extract variables and calculation "steps" for UI display
+//
+// Notes:
+// - All methods are static to keep usage simple and side‑effect free.
+// - Date handling supports both Date and DateTime semantics as needed.
+//
 class FormulaEngine {
     static RESULT_TYPE = {
         Text: 'Text',
@@ -721,8 +703,13 @@ class FormulaEngine {
         DateTime: 'DateTime',
         Unknown: 'Unknown'
     };
-    static parse(formula) { const p = new Parser(); return p.parse(formula); }
+    // Parses a formula string into an AST using the recursive‑descent Parser
+    static parse(formula) {
+        const p = new Parser();
+        return p.parse(formula);
+    }
 
+    // Walks the AST to collect referenced field names and special tokens (e.g., NOW())
     static extractVariables(ast) {
         const variables = new Set();
         function traverse(node) {
@@ -751,6 +738,7 @@ class FormulaEngine {
         return Array.from(variables);
     }
 
+    // Maps a literal JS value to a formula result type
     static inferLiteralResultType(value) {
         if (value === null || value === undefined) return FormulaEngine.RESULT_TYPE.Unknown;
         if (typeof value === 'number') return FormulaEngine.RESULT_TYPE.Number;
@@ -759,6 +747,7 @@ class FormulaEngine {
         return FormulaEngine.RESULT_TYPE.Unknown;
     }
 
+    // Best‑effort unification of two inferred types (used by IF/CASE, operators)
     static unifyTypes(a, b) {
         if (!a) return b || FormulaEngine.RESULT_TYPE.Unknown;
         if (!b) return a || FormulaEngine.RESULT_TYPE.Unknown;
@@ -771,6 +760,7 @@ class FormulaEngine {
         return FormulaEngine.RESULT_TYPE.Unknown;
     }
 
+    // Annotates AST nodes in place with a best‑guess `resultType` using optional sample values
     static annotateTypes(ast, sampleVariables = {}) {
         const infer = (node) => {
             if (!node) return FormulaEngine.RESULT_TYPE.Unknown;
@@ -858,6 +848,7 @@ class FormulaEngine {
         return ast;
     }
 
+    // Returns the formula result type for a known function based on argument types
     static functionReturnType(name, argTypes) {
         const n = name.toUpperCase();
         switch (n) {
@@ -900,6 +891,7 @@ class FormulaEngine {
         }
     }
 
+    // Serializes an AST back into a human‑readable formula string
     static rebuild(ast) {
         if (!ast || !ast.type) return '';
         switch (ast.type) {
@@ -923,11 +915,13 @@ class FormulaEngine {
         }
     }
 
+    // Attempts to normalize a value to a Date (Date or ISO/date‑like string)
     static toDate(value) {
         if (this.isDate(value)) return value;
         if (this.isDateString(value)) return new Date(value);
         return null;
     }
+    // Type guards for date values/strings
     static isDate(value) { return value instanceof Date; }
     static isDateString(value) {
         if (typeof value !== 'string' || value.trim() === '') return false;
@@ -935,6 +929,7 @@ class FormulaEngine {
         return !isNaN(date.getTime());
     }
 
+    // Evaluates an AST with provided variable values (best‑effort local execution)
     static calculate(ast, variables = {}) {
         if (!ast) return null;
         switch (ast.type) {
@@ -1143,6 +1138,7 @@ class FormulaEngine {
         }
     }
 
+    // Produces a de‑duplicated list of intermediate expressions (for step‑by‑step UI)
     static extractCalculationSteps(ast) {
         const steps = [];
         const seen = new Set();
@@ -1180,12 +1176,51 @@ class FormulaEngine {
     }
 }
 
+//
+// FormulaUI
+//
+// Small UI helper focused on rendering formula analysis in the page:
+// - Extracts the current formula from the editor
+// - Renders variables, result panel, and calculation steps
+// - Locally evaluates the formula or delegates step evaluation to Apex
+//
+// All methods are static and expect a `Document` to operate on.
+//
 class FormulaUI {
+    // Entry point for running analysis: parses, annotates, and renders results
+    static run(doc = (typeof window !== 'undefined' ? window.document : null)) {
+        if (!doc) return;
+        const formula = FormulaUI.extractFormulaContent(doc);
+        const debugOutput = doc.getElementById('debugOutput');
+        if (!debugOutput) {
+            console.error('Debug output element not found.');
+            return;
+        }
+
+        try {
+            if (!formula || formula.trim() === '') {
+                debugOutput.innerText = 'No formula to analyze';
+                return;
+            }
+
+            const ast = FormulaEngine.parse(formula.trim());
+            // annotate AST with inferred result types
+            FormulaEngine.annotateTypes(ast);
+
+            FormulaUI.displayDataStructure(ast, doc);
+
+        } catch (error) {
+            debugOutput.innerHTML = `<div style="color: red; padding: 10px; background: #ffe8e8; border: 1px solid #f44336; border-radius: 4px;">\n            <strong>Formula Analysis Error:</strong><br>${error.message}\n        </div>`;
+        }
+    }
+
+    // Reads formula text from the standard Salesforce editor textarea
     static extractFormulaContent(doc) {
         const formulaTextarea = doc.getElementById('CalculatedFormula');
         return formulaTextarea ? (formulaTextarea.value || 'No formula content found.') : 'Formula editor not found.';
     }
 
+    // Renders variables, calculate button, and initial steps list into the debug area
     static displayDataStructure(ast, doc) {
         const debugOutput = doc.getElementById('debugOutput');
         if (!debugOutput) return;
@@ -1294,6 +1329,7 @@ class FormulaUI {
         debugOutput.appendChild(container);
     }
 
+    // Calculates the overall formula result and updates per‑step results
     static async calculateAndDisplay(ast, doc) {
         const resultDiv = doc.getElementById('calculationResult');
         if (!resultDiv) return;
@@ -1320,6 +1356,7 @@ class FormulaUI {
         }
     }
 
+    // Rebuilds the steps list and fills in results (locally or via Apex)
     static async updateStepsWithCalculation(ast, variables, doc) {
         const stepsList = doc.getElementById('stepsList');
         if (!stepsList) return;
@@ -1384,6 +1421,7 @@ class FormulaUI {
     }
 
     // Build a single Anonymous Apex execution that evaluates all steps and logs results
+    // Generates a single Anonymous Apex script that evaluates all steps and logs results
     static buildAnonymousApexForSteps(steps, astRoot, doc, runId) {
         const apexEscape = (s) => (s || '')
             .replace(/\\/g, '\\\\')
@@ -1481,6 +1519,7 @@ class FormulaUI {
         return lines.join('\n');
     }
 
+    // Reads user‑entered variable values from the rendered inputs
     static getVariableValues(ast, doc) {
         const variables = FormulaEngine.extractVariables(ast);
         const values = {};
@@ -1490,6 +1529,12 @@ class FormulaUI {
         });
         return values;
     }
+}
+
+// Initialize content script when iframe is loaded (guarded for Node tests)
+if (typeof window !== 'undefined') {
+    const uiBootstrap = new UIBootstrap();
+    uiBootstrap.init();
 }
 
 // Export for Node.js tests (without affecting browser usage)
