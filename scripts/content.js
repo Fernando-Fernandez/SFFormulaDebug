@@ -420,519 +420,6 @@ class Parser {
     }
 }
 
-function extractVariables(ast) {
-    const variables = new Set();
-
-    function traverse(node) {
-        if (!node) return;
-
-        switch (node.type) {
-            case "Field":
-                variables.add(node.name);
-                break;
-            case "Function":
-                // Special handling for NOW() - treat it as a testable variable
-                if (node.name.toUpperCase() === "NOW") {
-                    variables.add("NOW()");
-                }
-                node.arguments.forEach(arg => traverse(arg));
-                break;
-            case "Operator":
-                traverse(node.left);
-                traverse(node.right);
-                break;
-            case "Literal":
-                break;
-            default:
-                throw new Error(`Unknown AST node type: ${node.type}`);
-        }
-    }
-
-    traverse(ast);
-    return Array.from(variables);
-}
-
-// Simple result type system to annotate AST nodes
-const RESULT_TYPE = {
-    Text: 'Text',
-    Number: 'Number',
-    Boolean: 'Boolean',
-    Date: 'Date',
-    DateTime: 'DateTime',
-    Unknown: 'Unknown'
-};
-
-function inferLiteralResultType(value) {
-    if (value === null || value === undefined) return RESULT_TYPE.Unknown;
-    if (typeof value === 'number') return RESULT_TYPE.Number;
-    if (typeof value === 'string') return RESULT_TYPE.Text;
-    if (isDate(value)) return RESULT_TYPE.DateTime; // JS Date holds date-time
-    return RESULT_TYPE.Unknown;
-}
-
-function unifyTypes(a, b) {
-    if (!a) return b || RESULT_TYPE.Unknown;
-    if (!b) return a || RESULT_TYPE.Unknown;
-    if (a === b) return a;
-    // If any is Text, treat as Text
-    if (a === RESULT_TYPE.Text || b === RESULT_TYPE.Text) return RESULT_TYPE.Text;
-    // Date + Number yields Date; DateTime + Number yields DateTime
-    if ((a === RESULT_TYPE.Date && b === RESULT_TYPE.Number) || (b === RESULT_TYPE.Date && a === RESULT_TYPE.Number)) return RESULT_TYPE.Date;
-    if ((a === RESULT_TYPE.DateTime && b === RESULT_TYPE.Number) || (b === RESULT_TYPE.DateTime && a === RESULT_TYPE.Number)) return RESULT_TYPE.DateTime;
-    // Prefer Number over Unknown
-    if (a === RESULT_TYPE.Unknown) return b;
-    if (b === RESULT_TYPE.Unknown) return a;
-    // Fallback to Unknown when incompatible
-    return RESULT_TYPE.Unknown;
-}
-
-// Annotate AST nodes with resultType by static inference and sample inputs
-function annotateTypes(ast, sampleVariables = {}) {
-    function infer(node) {
-        if (!node) return RESULT_TYPE.Unknown;
-        switch (node.type) {
-            case 'Literal': {
-                node.resultType = inferLiteralResultType(node.value);
-                return node.resultType;
-            }
-            case 'Field': {
-                // Try to infer from provided sample value
-                const v = sampleVariables[node.name];
-                if (v === undefined || v === null || v === '') {
-                    node.resultType = RESULT_TYPE.Unknown;
-                } else if (typeof v === 'number') {
-                    node.resultType = RESULT_TYPE.Number;
-                } else if (isDate(v)) {
-                    node.resultType = RESULT_TYPE.DateTime;
-                } else if (typeof v === 'string') {
-                    // Try to parse date/datetime, else number, else text
-                    const dt = toDate(v);
-                    if (dt) {
-                        // Heuristic: if string includes 'T' assume DateTime; else Date
-                        node.resultType = v.includes('T') ? RESULT_TYPE.DateTime : RESULT_TYPE.Date;
-                    } else if (!isNaN(parseFloat(v))) {
-                        node.resultType = RESULT_TYPE.Number;
-                    } else {
-                        node.resultType = RESULT_TYPE.Text;
-                    }
-                } else {
-                    node.resultType = RESULT_TYPE.Unknown;
-                }
-                return node.resultType;
-            }
-            case 'Operator': {
-                const lt = infer(node.left);
-                const rt = infer(node.right);
-                switch (node.operator) {
-                    case '&&':
-                    case '||':
-                    case '=':
-                    case '!=':
-                    case '<>':
-                    case '<':
-                    case '>':
-                    case '<=':
-                    case '>=':
-                        node.resultType = RESULT_TYPE.Boolean;
-                        break;
-                    case '+': {
-                        if (lt === RESULT_TYPE.Text || rt === RESULT_TYPE.Text) node.resultType = RESULT_TYPE.Text;
-                        else if (lt === RESULT_TYPE.Date && rt === RESULT_TYPE.Number) node.resultType = RESULT_TYPE.Date;
-                        else if (lt === RESULT_TYPE.Number && rt === RESULT_TYPE.Date) node.resultType = RESULT_TYPE.Date;
-                        else if (lt === RESULT_TYPE.DateTime && rt === RESULT_TYPE.Number) node.resultType = RESULT_TYPE.DateTime;
-                        else if (lt === RESULT_TYPE.Number && rt === RESULT_TYPE.DateTime) node.resultType = RESULT_TYPE.DateTime;
-                        else node.resultType = RESULT_TYPE.Number;
-                        break;
-                    }
-                    case '-': {
-                        if ((lt === RESULT_TYPE.Date || lt === RESULT_TYPE.DateTime) && (rt === RESULT_TYPE.Date || rt === RESULT_TYPE.DateTime)) {
-                            node.resultType = RESULT_TYPE.Number; // difference in days
-                        } else if ((lt === RESULT_TYPE.Date || lt === RESULT_TYPE.DateTime) && rt === RESULT_TYPE.Number) {
-                            node.resultType = lt; // same date-like type
-                        } else {
-                            node.resultType = RESULT_TYPE.Number;
-                        }
-                        break;
-                    }
-                    case '*':
-                    case '/':
-                        node.resultType = RESULT_TYPE.Number;
-                        break;
-                    default:
-                        node.resultType = RESULT_TYPE.Unknown;
-                }
-                return node.resultType;
-            }
-            case 'Function': {
-                const argTypes = node.arguments.map(arg => infer(arg));
-                node.resultType = functionReturnType(node.name, argTypes);
-                return node.resultType;
-            }
-            default:
-                node.resultType = RESULT_TYPE.Unknown;
-                return node.resultType;
-        }
-    }
-
-    infer(ast);
-    return ast;
-}
-
-function functionReturnType(name, argTypes) {
-    const n = name.toUpperCase();
-    switch (n) {
-        case 'IF':
-            // IF(condition:Boolean, then:X, else:X) => X (unify then/else)
-            return unifyTypes(argTypes[1], argTypes[2]);
-        case 'CONTAINS':
-            return RESULT_TYPE.Boolean;
-        case 'FIND':
-            return RESULT_TYPE.Number;
-        case 'MID':
-            return RESULT_TYPE.Text;
-        case 'FLOOR':
-            return RESULT_TYPE.Number;
-        case 'CASE':
-            // CASE(expression, val1,res1, ..., default) => unify of results
-            if (argTypes.length >= 3) {
-                let t = RESULT_TYPE.Unknown;
-                for (let i = 2; i < argTypes.length; i += 2) {
-                    t = unifyTypes(t, argTypes[i]);
-                }
-                // default at the end if odd count after expression
-                if ((argTypes.length - 1) % 2 === 1) {
-                    t = unifyTypes(t, argTypes[argTypes.length - 1]);
-                }
-                return t;
-            }
-            return RESULT_TYPE.Unknown;
-        case 'AND':
-        case 'OR':
-        case 'NOT':
-        case 'ISPICKVAL':
-        case 'ISBLANK':
-            return RESULT_TYPE.Boolean;
-        case 'NOW':
-            return RESULT_TYPE.DateTime;
-        case 'DATE':
-            return RESULT_TYPE.Date;
-        case 'DATEVALUE':
-            return RESULT_TYPE.Date;
-        default:
-            return RESULT_TYPE.Unknown;
-    }
-}
-
-function rebuildFormula(ast) {
-    if (!ast || !ast.type) return "";
-
-    switch (ast.type) {
-        case "Function":
-            const args = ast.arguments.map(arg => rebuildFormula(arg)).join(", ");
-            return `${ast.name}(${args})`;
-        case "Operator":
-            const left = rebuildFormula(ast.left);
-            const right = rebuildFormula(ast.right);
-            return `${left} ${ast.operator} ${right}`;
-        case "Field":
-            return ast.name;
-        case "Literal":
-            if (ast.value === null) {
-                return "null";
-            }
-            if (typeof ast.value === "string") {
-                return `"${ast.value}"`;
-            }
-            return ast.value.toString();
-        default:
-            throw new Error(`Unknown AST node type: ${ast.type}`);
-    }
-}
-
-function toDate(value) {
-    if (isDate(value)) return value;
-    if (isDateString(value)) return new Date(value);
-    return null;
-}
-
-function isDate(value) {
-    return value instanceof Date;
-}
-
-function isDateString(value) {
-    if (typeof value !== 'string' || value.trim() === '') return false;
-    const date = new Date(value);
-    return !isNaN(date.getTime());
-}
-
-function calculateFormula(ast, variables = {}) {
-    if (!ast) return null;
-
-    switch (ast.type) {
-        case "Function":
-            const args = ast.arguments.map(arg => calculateFormula(arg, variables));
-            switch (ast.name.toUpperCase()) {
-                case "IF": return args[0] ? args[1] : args[2];
-                case "CONTAINS":
-                    const text = String(args[0] || "");
-                    const substring = String(args[1] || "");
-                    return text.includes(substring);
-                case "FIND":
-                    const findText = String(args[1] || "");
-                    const findSubstring = String(args[0] || "");
-                    const startPos = args[2] ? parseInt(args[2]) - 1 : 0;
-                    const pos = findText.indexOf(findSubstring, startPos);
-                    return pos === -1 ? 0 : pos + 1;
-                case "MID":
-                    const midText = String(args[0] || "");
-                    const start = parseInt(args[1] || 1) - 1;
-                    const length = parseInt(args[2] || 0);
-                    return midText.substr(start, length);
-                case "FLOOR":
-                    if (args.length !== 1) 
-                        throw new Error("FLOOR requires exactly one argument");
-                    const number = parseFloat(args[0]);
-                    if (isNaN(number)) 
-                        throw new Error("FLOOR argument must be numeric");
-                    return Math.floor(number);
-                case "CASE":
-                    if (args.length < 4 || args.length % 2 === 1) {
-                        throw new Error("CASE requires an expression, at least one value-result pair, "
-                                        + "and a default value (even number of arguments)");
-                    }
-                    const expressionValue = args[0];
-                    for (let i = 1; i < args.length - 1; i += 2) {
-                        if (expressionValue === args[i]) {
-                            return args[i + 1];
-                        }
-                    }
-                    return args[args.length - 1];
-                case "AND":
-                    if (args.length === 0) {
-                        throw new Error("AND requires at least one argument");
-                    }
-                    return args.every(arg => Boolean(arg));
-                case "OR":
-                    if (args.length === 0) {
-                        throw new Error("OR requires at least one argument");
-                    }
-                    return args.some(arg => Boolean(arg));
-                case "NOT":
-                    if (args.length !== 1) {
-                        throw new Error("NOT requires exactly one argument");
-                    }
-                    return !Boolean(args[0]);
-                case "ISPICKVAL":
-                    if (args.length !== 2) {
-                        throw new Error("ISPICKVAL requires exactly two arguments: field and value");
-                    }
-                    const fieldValue = String(args[0] || "");
-                    const picklistValue = String(args[1] || "");
-                    return fieldValue === picklistValue;
-                case "ISBLANK":
-                    if (args.length !== 1) {
-                        throw new Error("ISBLANK requires exactly one argument");
-                    }
-                    const value = args[0];
-                    if (value === null || value === undefined) {
-                        return true;
-                    }
-                    const stringValue = String(value).trim();
-                    return stringValue === "";
-                case "NOW":
-                    if (args.length !== 0) {
-                        throw new Error("NOW requires no arguments");
-                    }
-                    // For testing purposes, check if there's a test value provided
-                    if (variables && variables['NOW()'] !== undefined) {
-                        const testValue = variables['NOW()'];
-                        if (testValue === '') {
-                            return new Date();
-                        }
-                        const parsedDate = new Date(testValue);
-                        if (isNaN(parsedDate.getTime())) {
-                            throw new Error("Invalid date format for NOW() test value");
-                        }
-                        return parsedDate;
-                    }
-                    return new Date();
-                case "DATEVALUE":
-                    if (args.length !== 1) {
-                        throw new Error("DATEVALUE requires exactly one argument");
-                    }
-                    if (args[0] === null || args[0] === undefined || String(args[0]).trim() === '') {
-                        return null;
-                    }
-                    if (isDate(args[0])) {
-                        const d0 = args[0];
-                        return new Date(d0.getFullYear(), d0.getMonth(), d0.getDate());
-                    }
-                    if (typeof args[0] === 'string') {
-                        const d1 = toDate(args[0]);
-                        if (!d1) {
-                            throw new Error("Invalid date format for DATEVALUE");
-                        }
-                        return new Date(d1.getFullYear(), d1.getMonth(), d1.getDate());
-                    }
-                    throw new Error("DATEVALUE argument must be a date/time or text");
-                case "DATE":
-                    if (args.length !== 3) {
-                        throw new Error("DATE requires exactly three arguments: year, month, day");
-                    }
-                    const y = parseInt(args[0], 10);
-                    const m = parseInt(args[1], 10);
-                    const d = parseInt(args[2], 10);
-                    if ([y, m, d].some(v => isNaN(v))) {
-                        throw new Error("DATE arguments must be numeric");
-                    }
-                    if (m < 1 || m > 12) {
-                        throw new Error("DATE month must be between 1 and 12");
-                    }
-                    if (d < 1 || d > 31) {
-                        throw new Error("DATE day must be between 1 and 31");
-                    }
-                    // Construct at midnight local time
-                    return new Date(y, m - 1, d);
-                default: throw new Error(`Unsupported function: ${ast.name}`);
-            }
-
-        case "Operator":
-            const left = calculateFormula(ast.left, variables);
-            const right = calculateFormula(ast.right, variables);
-            
-            const leftDate = toDate(left);
-            const rightDate = toDate(right);
-            
-            switch (ast.operator) {
-                case "+":
-                    // String concatenation
-                    if (typeof left === "string" || typeof right === "string") {
-                        return String(left) + String(right);
-                    }
-                    // Date + number (add days)
-                    if (leftDate && typeof right === "number") {
-                        return new Date(leftDate.getTime() + (right * 24 * 60 * 60 * 1000));
-                    }
-                    if (typeof left === "number" && rightDate) {
-                        return new Date(rightDate.getTime() + (left * 24 * 60 * 60 * 1000));
-                    }
-                    // Number arithmetic
-                    return (parseFloat(left) || 0) + (parseFloat(right) || 0);
-                
-                case "-":
-                    // Date - Date = difference in days
-                    if (leftDate && rightDate) {
-                        const diffMs = leftDate.getTime() - rightDate.getTime();
-                        return diffMs / (1000 * 60 * 60 * 24); // Convert to days
-                    }
-                    // Date - number (subtract days)
-                    if (leftDate && typeof right === "number") {
-                        return new Date(leftDate.getTime() - (right * 24 * 60 * 60 * 1000));
-                    }
-                    // Number arithmetic
-                    return (parseFloat(left) || 0) - (parseFloat(right) || 0);
-                
-                case "*": return (parseFloat(left) || 0) * (parseFloat(right) || 0);
-                case "/":
-                    const divisor = parseFloat(right) || 0;
-                    if (divisor === 0) throw new Error("Division by zero");
-                    return (parseFloat(left) || 0) / divisor;
-                case "&&": return Boolean(left) && Boolean(right);
-                case "||": return Boolean(left) || Boolean(right);
-                case "=": 
-                    // Date comparison
-                    if (leftDate && rightDate) {
-                        return leftDate.getTime() === rightDate.getTime();
-                    }
-                    return left === right;
-                case "<>": 
-                case "!=": 
-                    // Date comparison
-                    if (leftDate && rightDate) {
-                        return leftDate.getTime() !== rightDate.getTime();
-                    }
-                    return left !== right;
-                case "<": 
-                    // Date comparison
-                    if (leftDate && rightDate) {
-                        return leftDate.getTime() < rightDate.getTime();
-                    }
-                    return (parseFloat(left) || 0) < (parseFloat(right) || 0);
-                case ">": 
-                    // Date comparison
-                    if (leftDate && rightDate) {
-                        return leftDate.getTime() > rightDate.getTime();
-                    }
-                    return (parseFloat(left) || 0) > (parseFloat(right) || 0);
-                case "<=": 
-                    // Date comparison
-                    if (leftDate && rightDate) {
-                        return leftDate.getTime() <= rightDate.getTime();
-                    }
-                    return (parseFloat(left) || 0) <= (parseFloat(right) || 0);
-                case ">=": 
-                    // Date comparison
-                    if (leftDate && rightDate) {
-                        return leftDate.getTime() >= rightDate.getTime();
-                    }
-                    return (parseFloat(left) || 0) >= (parseFloat(right) || 0);
-                default: throw new Error(`Unsupported operator: ${ast.operator}`);
-            }
-
-        case "Field":
-            const fieldValue = variables[ast.name] !== undefined ? variables[ast.name] : "";
-            // Try to parse as date if it looks like a date string
-            if (typeof fieldValue === 'string' && fieldValue.trim() !== '') {
-                const dateValue = toDate(fieldValue);
-                if (dateValue) return dateValue;
-            }
-            return fieldValue;
-
-        case "Literal":
-            return ast.value;
-
-        default:
-            throw new Error(`Unknown AST node type: ${ast.type}`);
-    }
-}
-
-function extractCalculationSteps(ast) {
-    const steps = [];
-    const seen = new Set();
-
-    function traverse(node) {
-        if (!node) return;
-
-        switch (node.type) {
-            case "Function":
-                node.arguments.forEach(arg => traverse(arg));
-                const expr = FormulaEngine.rebuild(node);
-                if (!seen.has(expr)) {
-                    seen.add(expr);
-                    steps.push({ expression: expr, node });
-                }
-                break;
-            case "Operator":
-                traverse(node.left);
-                traverse(node.right);
-                const opExpr = FormulaEngine.rebuild(node);
-                if (!seen.has(opExpr)) {
-                    seen.add(opExpr);
-                    steps.push({ expression: opExpr, node });
-                }
-                break;
-            case "Field":
-            case "Literal":
-                break;
-            default:
-                throw new Error(`Unknown AST node type: ${node.type}`);
-        }
-    }
-
-    traverse(ast);
-    return steps;
-}
-
 // ToolingAPIHandler
 //
 // Thin wrapper around Salesforce Tooling API endpoints that this extension
@@ -1225,29 +712,474 @@ class ToolingAPIHandler {
     }
 }
 
-/**
- * FormulaEngine: facade around parsing, typing and evaluation helpers.
- * These wrappers call the existing global functions to preserve behavior.
- */
 class FormulaEngine {
+    static RESULT_TYPE = {
+        Text: 'Text',
+        Number: 'Number',
+        Boolean: 'Boolean',
+        Date: 'Date',
+        DateTime: 'DateTime',
+        Unknown: 'Unknown'
+    };
     static parse(formula) { const p = new Parser(); return p.parse(formula); }
-    static annotateTypes(ast, sample = {}) { return globalThis.annotateTypes(ast, sample); }
-    static inferLiteralResultType(v) { return globalThis.inferLiteralResultType(v); }
-    static unifyTypes(a, b) { return globalThis.unifyTypes(a, b); }
-    static functionReturnType(name, argTypes) { return globalThis.functionReturnType(name, argTypes); }
-    static rebuild(ast) { return globalThis.rebuildFormula(ast); }
-    static extractVariables(ast) { return globalThis.extractVariables(ast); }
-    static extractCalculationSteps(ast) { return globalThis.extractCalculationSteps(ast); }
-    static calculate(ast, vars = {}) { return globalThis.calculateFormula(ast, vars); }
-    static toDate(v) { return globalThis.toDate(v); }
-    static isDate(v) { return globalThis.isDate(v); }
-    static isDateString(v) { return globalThis.isDateString(v); }
+
+    static extractVariables(ast) {
+        const variables = new Set();
+        function traverse(node) {
+            if (!node) return;
+            switch (node.type) {
+                case 'Field':
+                    variables.add(node.name);
+                    break;
+                case 'Function':
+                    if (node.name.toUpperCase() === 'NOW') {
+                        variables.add('NOW()');
+                    }
+                    node.arguments.forEach(arg => traverse(arg));
+                    break;
+                case 'Operator':
+                    traverse(node.left);
+                    traverse(node.right);
+                    break;
+                case 'Literal':
+                    break;
+                default:
+                    throw new Error(`Unknown AST node type: ${node.type}`);
+            }
+        }
+        traverse(ast);
+        return Array.from(variables);
+    }
+
+    static inferLiteralResultType(value) {
+        if (value === null || value === undefined) return FormulaEngine.RESULT_TYPE.Unknown;
+        if (typeof value === 'number') return FormulaEngine.RESULT_TYPE.Number;
+        if (typeof value === 'string') return FormulaEngine.RESULT_TYPE.Text;
+        if (this.isDate(value)) return FormulaEngine.RESULT_TYPE.DateTime;
+        return FormulaEngine.RESULT_TYPE.Unknown;
+    }
+
+    static unifyTypes(a, b) {
+        if (!a) return b || FormulaEngine.RESULT_TYPE.Unknown;
+        if (!b) return a || FormulaEngine.RESULT_TYPE.Unknown;
+        if (a === b) return a;
+        if (a === FormulaEngine.RESULT_TYPE.Text || b === FormulaEngine.RESULT_TYPE.Text) return FormulaEngine.RESULT_TYPE.Text;
+        if ((a === FormulaEngine.RESULT_TYPE.Date && b === FormulaEngine.RESULT_TYPE.Number) || (b === FormulaEngine.RESULT_TYPE.Date && a === FormulaEngine.RESULT_TYPE.Number)) return FormulaEngine.RESULT_TYPE.Date;
+        if ((a === FormulaEngine.RESULT_TYPE.DateTime && b === FormulaEngine.RESULT_TYPE.Number) || (b === FormulaEngine.RESULT_TYPE.DateTime && a === FormulaEngine.RESULT_TYPE.Number)) return FormulaEngine.RESULT_TYPE.DateTime;
+        if (a === FormulaEngine.RESULT_TYPE.Unknown) return b;
+        if (b === FormulaEngine.RESULT_TYPE.Unknown) return a;
+        return FormulaEngine.RESULT_TYPE.Unknown;
+    }
+
+    static annotateTypes(ast, sampleVariables = {}) {
+        const infer = (node) => {
+            if (!node) return FormulaEngine.RESULT_TYPE.Unknown;
+            switch (node.type) {
+                case 'Literal': {
+                    node.resultType = this.inferLiteralResultType(node.value);
+                    return node.resultType;
+                }
+                case 'Field': {
+                    const v = sampleVariables[node.name];
+                    if (v === undefined || v === null || v === '') {
+                        node.resultType = FormulaEngine.RESULT_TYPE.Unknown;
+                    } else if (typeof v === 'number') {
+                        node.resultType = FormulaEngine.RESULT_TYPE.Number;
+                    } else if (this.isDate(v)) {
+                        node.resultType = FormulaEngine.RESULT_TYPE.DateTime;
+                    } else if (typeof v === 'string') {
+                        const dt = this.toDate(v);
+                        if (dt) {
+                            node.resultType = v.includes('T') ? FormulaEngine.RESULT_TYPE.DateTime : FormulaEngine.RESULT_TYPE.Date;
+                        } else if (!isNaN(parseFloat(v))) {
+                            node.resultType = FormulaEngine.RESULT_TYPE.Number;
+                        } else {
+                            node.resultType = FormulaEngine.RESULT_TYPE.Text;
+                        }
+                    } else {
+                        node.resultType = FormulaEngine.RESULT_TYPE.Unknown;
+                    }
+                    return node.resultType;
+                }
+                case 'Operator': {
+                    const lt = infer(node.left);
+                    const rt = infer(node.right);
+                    switch (node.operator) {
+                        case '&&':
+                        case '||':
+                        case '=':
+                        case '!=':
+                        case '<>':
+                        case '<':
+                        case '>':
+                        case '<=':
+                        case '>=':
+                            node.resultType = FormulaEngine.RESULT_TYPE.Boolean;
+                            break;
+                        case '+': {
+                            if (lt === FormulaEngine.RESULT_TYPE.Text || rt === FormulaEngine.RESULT_TYPE.Text) node.resultType = FormulaEngine.RESULT_TYPE.Text;
+                            else if (lt === FormulaEngine.RESULT_TYPE.Date && rt === FormulaEngine.RESULT_TYPE.Number) node.resultType = FormulaEngine.RESULT_TYPE.Date;
+                            else if (lt === FormulaEngine.RESULT_TYPE.Number && rt === FormulaEngine.RESULT_TYPE.Date) node.resultType = FormulaEngine.RESULT_TYPE.Date;
+                            else if (lt === FormulaEngine.RESULT_TYPE.DateTime && rt === FormulaEngine.RESULT_TYPE.Number) node.resultType = FormulaEngine.RESULT_TYPE.DateTime;
+                            else if (lt === FormulaEngine.RESULT_TYPE.Number && rt === FormulaEngine.RESULT_TYPE.DateTime) node.resultType = FormulaEngine.RESULT_TYPE.DateTime;
+                            else node.resultType = FormulaEngine.RESULT_TYPE.Number;
+                            break;
+                        }
+                        case '-': {
+                            if ((lt === FormulaEngine.RESULT_TYPE.Date || lt === FormulaEngine.RESULT_TYPE.DateTime) && (rt === FormulaEngine.RESULT_TYPE.Date || rt === FormulaEngine.RESULT_TYPE.DateTime)) {
+                                node.resultType = FormulaEngine.RESULT_TYPE.Number;
+                            } else if ((lt === FormulaEngine.RESULT_TYPE.Date || lt === FormulaEngine.RESULT_TYPE.DateTime) && rt === FormulaEngine.RESULT_TYPE.Number) {
+                                node.resultType = lt;
+                            } else {
+                                node.resultType = FormulaEngine.RESULT_TYPE.Number;
+                            }
+                            break;
+                        }
+                        case '*':
+                        case '/':
+                            node.resultType = FormulaEngine.RESULT_TYPE.Number;
+                            break;
+                        default:
+                            node.resultType = FormulaEngine.RESULT_TYPE.Unknown;
+                    }
+                    return node.resultType;
+                }
+                case 'Function': {
+                    const argTypes = node.arguments.map(arg => infer(arg));
+                    node.resultType = this.functionReturnType(node.name, argTypes);
+                    return node.resultType;
+                }
+                default:
+                    node.resultType = FormulaEngine.RESULT_TYPE.Unknown;
+                    return node.resultType;
+            }
+        };
+        infer(ast);
+        return ast;
+    }
+
+    static functionReturnType(name, argTypes) {
+        const n = name.toUpperCase();
+        switch (n) {
+            case 'IF':
+                return this.unifyTypes(argTypes[1], argTypes[2]);
+            case 'CONTAINS':
+                return FormulaEngine.RESULT_TYPE.Boolean;
+            case 'FIND':
+                return FormulaEngine.RESULT_TYPE.Number;
+            case 'MID':
+                return FormulaEngine.RESULT_TYPE.Text;
+            case 'FLOOR':
+                return FormulaEngine.RESULT_TYPE.Number;
+            case 'CASE':
+                if (argTypes.length >= 3) {
+                    let t = FormulaEngine.RESULT_TYPE.Unknown;
+                    for (let i = 2; i < argTypes.length; i += 2) {
+                        t = this.unifyTypes(t, argTypes[i]);
+                    }
+                    if ((argTypes.length - 1) % 2 === 1) {
+                        t = this.unifyTypes(t, argTypes[argTypes.length - 1]);
+                    }
+                    return t;
+                }
+                return FormulaEngine.RESULT_TYPE.Unknown;
+            case 'AND':
+            case 'OR':
+            case 'NOT':
+            case 'ISPICKVAL':
+            case 'ISBLANK':
+                return FormulaEngine.RESULT_TYPE.Boolean;
+            case 'NOW':
+                return FormulaEngine.RESULT_TYPE.DateTime;
+            case 'DATE':
+                return FormulaEngine.RESULT_TYPE.Date;
+            case 'DATEVALUE':
+                return FormulaEngine.RESULT_TYPE.Date;
+            default:
+                return FormulaEngine.RESULT_TYPE.Unknown;
+        }
+    }
+
+    static rebuild(ast) {
+        if (!ast || !ast.type) return '';
+        switch (ast.type) {
+            case 'Function': {
+                const args = ast.arguments.map(arg => this.rebuild(arg)).join(', ');
+                return `${ast.name}(${args})`;
+            }
+            case 'Operator': {
+                const left = this.rebuild(ast.left);
+                const right = this.rebuild(ast.right);
+                return `${left} ${ast.operator} ${right}`;
+            }
+            case 'Field':
+                return ast.name;
+            case 'Literal':
+                if (ast.value === null) return 'null';
+                if (typeof ast.value === 'string') return `"${ast.value}"`;
+                return ast.value.toString();
+            default:
+                throw new Error(`Unknown AST node type: ${ast.type}`);
+        }
+    }
+
+    static toDate(value) {
+        if (this.isDate(value)) return value;
+        if (this.isDateString(value)) return new Date(value);
+        return null;
+    }
+    static isDate(value) { return value instanceof Date; }
+    static isDateString(value) {
+        if (typeof value !== 'string' || value.trim() === '') return false;
+        const date = new Date(value);
+        return !isNaN(date.getTime());
+    }
+
+    static calculate(ast, variables = {}) {
+        if (!ast) return null;
+        switch (ast.type) {
+            case 'Function': {
+                const args = ast.arguments.map(arg => this.calculate(arg, variables));
+                switch (ast.name.toUpperCase()) {
+                    case 'IF': return args[0] ? args[1] : args[2];
+                    case 'CONTAINS': {
+                        const text = String(args[0] || '');
+                        const substring = String(args[1] || '');
+                        return text.includes(substring);
+                    }
+                    case 'FIND': {
+                        const findText = String(args[1] || '');
+                        const findSubstring = String(args[0] || '');
+                        const startPos = args[2] ? parseInt(args[2]) - 1 : 0;
+                        const pos = findText.indexOf(findSubstring, startPos);
+                        return pos === -1 ? 0 : pos + 1;
+                    }
+                    case 'MID': {
+                        const midText = String(args[0] || '');
+                        const start = parseInt(args[1] || 1) - 1;
+                        const length = parseInt(args[2] || 0);
+                        return midText.substr(start, length);
+                    }
+                    case 'FLOOR': {
+                        if (args.length !== 1) throw new Error('FLOOR requires exactly one argument');
+                        const number = parseFloat(args[0]);
+                        if (isNaN(number)) throw new Error('FLOOR argument must be numeric');
+                        return Math.floor(number);
+                    }
+                    case "CASE": {
+                        if (args.length < 4 || args.length % 2 === 1) {
+                            throw new Error("CASE requires an expression, at least one value-result pair, "
+                                            + "and a default value (even number of arguments)");
+                        }
+                        const expressionValue = args[0];
+                        for (let i = 1; i < args.length - 1; i += 2) {
+                            if (expressionValue === args[i]) {
+                                return args[i + 1];
+                            }
+                        }
+                        return args[args.length - 1];
+                    }
+                    case "AND": {
+                        if (args.length === 0) {
+                            throw new Error("AND requires at least one argument");
+                        }
+                        return args.every(arg => Boolean(arg));
+                    }
+                    case "OR": {
+                        if (args.length === 0) {
+                            throw new Error("OR requires at least one argument");
+                        }
+                        return args.some(arg => Boolean(arg));
+                    }
+                    case "NOT": {
+                        if (args.length !== 1) {
+                            throw new Error("NOT requires exactly one argument");
+                        }
+                        return !Boolean(args[0]);
+                    }
+                    case "ISPICKVAL": {
+                        if (args.length !== 2) {
+                            throw new Error("ISPICKVAL requires exactly two arguments: field and value");
+                        }
+                        const fieldValue = String(args[0] || "");
+                        const picklistValue = String(args[1] || "");
+                        return fieldValue === picklistValue;
+                    }
+                    case "ISBLANK": {
+                        if (args.length !== 1) {
+                            throw new Error("ISBLANK requires exactly one argument");
+                        }
+                        const value = args[0];
+                        if (value === null || value === undefined) {
+                            return true;
+                        }
+                        const stringValue = String(value).trim();
+                        return stringValue === "";
+                    }
+                    case "NOW": {
+                        if (args.length !== 0) {
+                            throw new Error("NOW requires no arguments");
+                        }
+                        // For testing purposes, check if there's a test value provided
+                        if (variables && variables['NOW()'] !== undefined) {
+                            const testValue = variables['NOW()'];
+                            if (testValue === '') {
+                                return new Date();
+                            }
+                            const parsedDate = new Date(testValue);
+                            if (isNaN(parsedDate.getTime())) {
+                                throw new Error("Invalid date format for NOW() test value");
+                            }
+                            return parsedDate;
+                        }
+                        return new Date();
+                    }
+                    case "DATEVALUE": {
+                        if (args.length !== 1) {
+                            throw new Error("DATEVALUE requires exactly one argument");
+                        }
+                        if (args[0] === null || args[0] === undefined || String(args[0]).trim() === '') {
+                            return null;
+                        }
+                        if (isDate(args[0])) {
+                            const d0 = args[0];
+                            return new Date(d0.getFullYear(), d0.getMonth(), d0.getDate());
+                        }
+                        if (typeof args[0] === 'string') {
+                            const d1 = toDate(args[0]);
+                            if (!d1) {
+                                throw new Error("Invalid date format for DATEVALUE");
+                            }
+                            return new Date(d1.getFullYear(), d1.getMonth(), d1.getDate());
+                        }
+                        throw new Error("DATEVALUE argument must be a date/time or text");
+                    }
+                    case "DATE": {
+                        if (args.length !== 3) {
+                            throw new Error("DATE requires exactly three arguments: year, month, day");
+                        }
+                        const y = parseInt(args[0], 10);
+                        const m = parseInt(args[1], 10);
+                        const d = parseInt(args[2], 10);
+                        if ([y, m, d].some(v => isNaN(v))) {
+                            throw new Error("DATE arguments must be numeric");
+                        }
+                        if (m < 1 || m > 12) {
+                            throw new Error("DATE month must be between 1 and 12");
+                        }
+                        if (d < 1 || d > 31) {
+                            throw new Error("DATE day must be between 1 and 31");
+                        }
+                        // Construct at midnight local time
+                        return new Date(y, m - 1, d);
+                    }
+                    default:
+                        throw new Error(`Unsupported function: ${ast.name}`);
+                }
+            }
+            case 'Operator': {
+                const left = this.calculate(ast.left, variables);
+                const right = this.calculate(ast.right, variables);
+                const leftDate = this.toDate(left);
+                const rightDate = this.toDate(right);
+                switch (ast.operator) {
+                    case '+':
+                        if (leftDate && typeof right === 'number') return new Date(leftDate.getTime() + (right * 24 * 60 * 60 * 1000));
+                        if (typeof left === 'number' && rightDate) return new Date(rightDate.getTime() + (left * 24 * 60 * 60 * 1000));
+                        return (parseFloat(left) || 0) + (parseFloat(right) || 0);
+                    case '-':
+                        if (leftDate && rightDate) {
+                            const diffMs = leftDate.getTime() - rightDate.getTime();
+                            return diffMs / (1000 * 60 * 60 * 24);
+                        }
+                        if (leftDate && typeof right === 'number') return new Date(leftDate.getTime() - (right * 24 * 60 * 60 * 1000));
+                        return (parseFloat(left) || 0) - (parseFloat(right) || 0);
+                    case '*':
+                        return (parseFloat(left) || 0) * (parseFloat(right) || 0);
+                    case '/': {
+                        const divisor = parseFloat(right) || 0;
+                        if (divisor === 0) throw new Error('Division by zero');
+                        return (parseFloat(left) || 0) / divisor;
+                    }
+                    case '&&': return Boolean(left) && Boolean(right);
+                    case '||': return Boolean(left) || Boolean(right);
+                    case '=':
+                        if (leftDate && rightDate) return leftDate.getTime() === rightDate.getTime();
+                        return left === right;
+                    case '<>':
+                    case '!=':
+                        if (leftDate && rightDate) return leftDate.getTime() !== rightDate.getTime();
+                        return left !== right;
+                    case '<':
+                        if (leftDate && rightDate) return leftDate.getTime() < rightDate.getTime();
+                        return (parseFloat(left) || 0) < (parseFloat(right) || 0);
+                    case '>':
+                        if (leftDate && rightDate) return leftDate.getTime() > rightDate.getTime();
+                        return (parseFloat(left) || 0) > (parseFloat(right) || 0);
+                    case '<=':
+                        if (leftDate && rightDate) return leftDate.getTime() <= rightDate.getTime();
+                        return (parseFloat(left) || 0) <= (parseFloat(right) || 0);
+                    case '>=':
+                        if (leftDate && rightDate) return leftDate.getTime() >= rightDate.getTime();
+                        return (parseFloat(left) || 0) >= (parseFloat(right) || 0);
+                    default:
+                        throw new Error(`Unsupported operator: ${ast.operator}`);
+                }
+            }
+            case 'Field': {
+                const fieldValue = variables[ast.name] !== undefined ? variables[ast.name] : '';
+                if (typeof fieldValue === 'string' && fieldValue.trim() !== '') {
+                    const dateValue = this.toDate(fieldValue);
+                    if (dateValue) {
+                        return dateValue;
+                    }
+                }
+                return fieldValue;
+            }
+            case 'Literal':
+                return ast.value;
+            default:
+                throw new Error(`Unknown AST node type: ${ast.type}`);
+        }
+    }
+
+    static extractCalculationSteps(ast) {
+        const steps = [];
+        const seen = new Set();
+        const traverse = (node) => {
+            if (!node) return;
+            switch (node.type) {
+                case 'Function': {
+                    node.arguments.forEach(arg => traverse(arg));
+                    const expr = this.rebuild(node);
+                    if (!seen.has(expr)) {
+                        seen.add(expr);
+                        steps.push({ expression: expr, node });
+                    }
+                    break;
+                }
+                case 'Operator': {
+                    traverse(node.left);
+                    traverse(node.right);
+                    const opExpr = this.rebuild(node);
+                    if (!seen.has(opExpr)) {
+                        seen.add(opExpr); 
+                        steps.push({ expression: opExpr, node });
+                    }
+                    break;
+                }
+                case 'Field':
+                case 'Literal':
+                    break;
+                default:
+                    throw new Error(`Unknown AST node type: ${node.type}`);
+            }
+        };
+        traverse(ast);
+        return steps;
+    }
 }
 
-/**
- * FormulaUI: wraps DOM-centric helpers used to render and calculate in-page.
- * Methods forward to existing global functions for a safe, incremental move.
- */
 class FormulaUI {
     static extractFormulaContent(doc) {
         const formulaTextarea = doc.getElementById('CalculatedFormula');
