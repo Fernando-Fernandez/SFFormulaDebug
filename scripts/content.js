@@ -1,11 +1,6 @@
 const GETHOSTANDSESSION = "getHostSession";
 const TOOLING_API_VERSION = 'v57.0';
 
-// TODO:  handle formulas in flow context (different URL)
-// https://.../builder_platform_interaction/flowBuilder.app?flowId=301...
-// div.formulaBuilder.slds-form-element
-// or div.container slds-rich-text-editor slds-grid slds-grid_vertical slds-nowrap
-
 var host, sessionId;
 
 // UIBootstrap
@@ -34,19 +29,43 @@ class UIBootstrap {
         this._mounted = false;
     }
 
-    // Returns true when the current URL looks like the formula editor
+    // Returns true when the current URL looks like the standard formula editor
     locationMatchesFormulaEditor() {
         try { return this.win && this.win.location && this.win.location.href.includes('/e?'); }
         catch { return false; }
     }
 
+    // Returns true when the current URL looks like the Flow Builder app
+    locationMatchesFlowEditor() {
+        try {
+            const href = this.win && this.win.location ? this.win.location.href : '';
+            return href.includes('/builder_platform_interaction/flowBuilder.app');
+        } catch { return false; }
+    }
+
     // Entry point — waits for the editor element and injects the UI once
     init() {
-        if (!this.doc || !this.win || !this.locationMatchesFormulaEditor()) return;
-        if (this.win === this.win.top) {
-            this.waitForIframeAndElement();
-        } else {
-            this.waitForElement('CalculatedFormula', () => this.injectUI());
+        if (!this.doc || !this.win) return;
+
+        if (this.locationMatchesFormulaEditor()) {
+            if (this.win === this.win.top) {
+                this.waitForIframeAndElement();
+            } else {
+                this.waitForElement('CalculatedFormula', () => this.injectUI());
+            }
+            return;
+        }
+
+        // Flow Builder context: heuristically watch for a likely formula textarea
+        if (this.locationMatchesFlowEditor()) {
+            const selectors = [
+                '#CalculatedFormula',
+                'textarea[name="CalculatedFormula"]',
+                'textarea[aria-label*="formula" i]',
+                'textarea[placeholder*="formula" i]'
+            ];
+            this.waitForAnySelector(selectors, (el) => this.injectUI(el));
+            return;
         }
     }
 
@@ -61,6 +80,28 @@ class UIBootstrap {
         const observer = new MutationObserver((mutations, obs) => {
             const el = this.doc.getElementById(elementId);
             if (el) { obs.disconnect(); callback(); }
+        });
+        observer.observe(this.doc, { childList: true, subtree: true });
+    }
+
+    // Waits for any of the provided CSS selectors to match; passes the element to callback
+    waitForAnySelector(selectors, callback) {
+        const tryFind = () => {
+            for (const sel of selectors) {
+                try {
+                    const el = this.doc.querySelector(sel);
+                    if (el) return el;
+                } catch (_) { /* ignore invalid selectors */ }
+            }
+            return null;
+        };
+
+        const found = tryFind();
+        if (found) { callback(found); return; }
+
+        const observer = new MutationObserver((mutations, obs) => {
+            const el = tryFind();
+            if (el) { obs.disconnect(); callback(el); }
         });
         observer.observe(this.doc, { childList: true, subtree: true });
     }
@@ -101,9 +142,9 @@ class UIBootstrap {
     // Mounts the Formula Debugger controls next to the formula textarea,
     // wiring the Run button to fetch host/session and kick off parsing.
     //
-    injectUI() {
+    injectUI(targetEl = null) {
         if (this._mounted) return;
-        const formulaTextarea = this.doc.getElementById('CalculatedFormula');
+        const formulaTextarea = targetEl || this.doc.getElementById('CalculatedFormula');
         if (!formulaTextarea) return;
         if (this.doc.getElementById('formulaDebugger')) return;
 
