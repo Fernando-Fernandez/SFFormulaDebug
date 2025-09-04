@@ -408,6 +408,9 @@ class ToolingAPIHandler {
         this.host = host;
         this.sessionId = sessionId;
         this.apiVersion = apiVersion;
+        // Store the most recent parsed results for access by callers
+        this.lastParsedResults = null;
+        this.lastRunId = null;
     }
 
     //
@@ -615,6 +618,9 @@ class ToolingAPIHandler {
             const response = await fetch(endpoint, request);
             const apexLog = await response.text();
             const parsed = this.parseApexLog(apexLog, runId);
+            // Persist parsed results for later inspection by UI code
+            this.lastParsedResults = parsed;
+            this.lastRunId = runId;
             const displayed = this.displayParsedResults(parsed, doc);
             if (displayed) return true;
             return parsed.fallback;
@@ -1248,6 +1254,26 @@ class FormulaUI {
                 resultsByExpr = new Map(Object.entries(results));
             }
         }
+        // If no explicit results provided, try to use last Apex results captured by ToolingAPIHandler
+        if (!results && FormulaUI.lastParsedResults && Array.isArray(FormulaUI.lastParsedResults.matches)) {
+            try {
+                const steps = FormulaEngine.extractCalculationSteps(ast);
+                const indexToExpr = new Map();
+                steps.forEach((s, i) => indexToExpr.set(i + 1, FormulaEngine.rebuild(s.node)));
+                resultsByExpr = new Map();
+                for (const m of FormulaUI.lastParsedResults.matches) {
+                    const idx = parseInt(m.stepIndex, 10);
+                    if (!Number.isNaN(idx) && indexToExpr.has(idx)) {
+                        const expr = indexToExpr.get(idx);
+                        resultsByExpr.set(expr, m.value);
+                    }
+                }
+                // Populate the results Map so lookupResult/renderLabel see it
+                results = resultsByExpr;
+                resultsIsMapLike = true;
+            } catch (_) { /* ignore */ }
+        }
+
         const formatResult = (v) => {
             if (v === undefined) return undefined;
             if (v === null) return 'null';
@@ -1282,12 +1308,12 @@ class FormulaUI {
                 case 'Function': {
                     const expr = FormulaEngine.rebuild(node);
                     const rv = formatResult(lookupResult(node));
-                    return rv !== undefined ? `${expr} = ${rv}` : `${expr}`;
+                    return rv !== undefined ? `${expr} <br><br>= ${rv}` : `${expr}`;
                 }
                 case 'Operator': {
                     const expr = FormulaEngine.rebuild(node);
                     const rv = formatResult(lookupResult(node));
-                    return rv !== undefined ? `${expr} = ${rv}` : `${expr}`;
+                    return rv !== undefined ? `${expr} <br><br>= ${rv}` : `${expr}`;
                 }
                 case 'Field':
                     return `${node.name}`;
@@ -1572,15 +1598,19 @@ class FormulaUI {
                 try {
                     const handler = new ToolingAPIHandler(host, sessionId, TOOLING_API_VERSION);
                     const ok = await handler.executeAnonymous(anonymousApex, runId, doc);
-                    // If results displayed, use the last step's value as main result
-                    if (ok && resultDiv) {
-                        const lastIdx = steps.length;
-                        const lastEl = doc.getElementById(`step-result-${runId}-${lastIdx}`);
-                        if (lastEl && lastEl.textContent) {
-                            const val = String(lastEl.textContent).replace(/^=\s*/, '');
-                            resultDiv.innerHTML = `<strong>Result:</strong> ${val}`;
+                    // expose last parsed results for other UI features (e.g., Mermaid)
+                    if (handler && handler.lastParsedResults) {
+                        FormulaUI.lastParsedResults = handler.lastParsedResults;
+                        FormulaUI.lastRunId = handler.lastRunId;
+                    }
+                    // Use stored parsed results instead of reading DOM
+                    if (ok && resultDiv && handler.lastParsedResults && Array.isArray(handler.lastParsedResults.matches)) {
+                        const matches = handler.lastParsedResults.matches;
+                        if (matches.length > 0) {
+                            let last = matches[ matches.length - 1 ];
+                            resultDiv.innerHTML = `<strong>Result:</strong> ${last.value}`;
                             resultDiv.style.display = 'block';
-                            resultDiv.style.background = '#a7ffaaff';
+                            resultDiv.style.background = '#4caf50';
                             resultDiv.style.borderColor = '#4caf50';
                         }
                     }
@@ -1597,7 +1627,7 @@ class FormulaUI {
             if (resultDiv && lastResultComputed !== undefined) {
                 resultDiv.innerHTML = `<strong>Result:</strong> ${lastResultComputed}`;
                 resultDiv.style.display = 'block';
-                resultDiv.style.background = '#a7ffaaff';
+                resultDiv.style.background = '#4caf50';
                 resultDiv.style.borderColor = '#4caf50';
             }
         }
