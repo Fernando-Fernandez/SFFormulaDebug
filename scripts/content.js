@@ -1401,7 +1401,15 @@ class FormulaUI {
 
     // Reads formula text from the standard Salesforce editor textarea
     static extractFormulaContent(doc) {
-        const formulaTextarea = doc.getElementById('CalculatedFormula');
+        const inFlow = window.location.href.includes('/builder_platform_interaction/flowBuilder.app');
+        let formulaTextarea;
+        if (inFlow) {
+            // Flow Builder editor
+            formulaTextarea = doc.querySelector('textarea[name="Formula"][id^="Formula-"]');
+        } else {
+            // Standard formula editor
+            formulaTextarea = doc.getElementById('CalculatedFormula');
+        }
         return formulaTextarea ? (formulaTextarea.value || 'No formula content found.') : 'Formula editor not found.';
     }
 
