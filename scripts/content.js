@@ -1,12 +1,10 @@
 const GETHOSTANDSESSION = "getHostSession";
 const TOOLING_API_VERSION = 'v57.0';
 
-// TODO:  add formula step results on each node of the Mermaid diagram
 // TODO:  handle formulas in flow context (different URL)
 // https://.../builder_platform_interaction/flowBuilder.app?flowId=301...
 // div.formulaBuilder.slds-form-element
 // or div.container slds-rich-text-editor slds-grid slds-grid_vertical slds-nowrap
-// TODO: Change openMermaidDiagram() to check whether there are results and use them if available.
 
 var host, sessionId;
 
@@ -1082,7 +1080,7 @@ class FormulaEngine {
                         return new Date(y, m - 1, d);
                     }
                     default:
-                        throw new Error(`Unsupported function: ${ast.name}`);
+                        throw new Error(`This tool doesn't support the function ${ast.name}`);
                 }
             }
             case 'Operator': {
