@@ -29,20 +29,6 @@ class UIBootstrap {
         this._mounted = false;
     }
 
-    // Returns true when the current URL looks like the standard formula editor
-    locationMatchesFormulaEditor() {
-        try { return this.win && this.win.location && this.win.location.href.includes('/e?'); }
-        catch { return false; }
-    }
-
-    // Returns true when the current URL looks like the Flow Builder app
-    locationMatchesFlowEditor() {
-        try {
-            const href = this.win && this.win.location ? this.win.location.href : '';
-            return href.includes('/builder_platform_interaction/flowBuilder.app');
-        } catch { return false; }
-    }
-
     // Entry point — waits for the editor element and injects the UI once
     init() {
         if (!this.doc || !this.win) return;
@@ -67,6 +53,20 @@ class UIBootstrap {
             this.waitForAnySelector(selectors, (el) => this.injectUI(el));
             return;
         }
+    }
+
+    // Returns true when the current URL looks like the standard formula editor
+    locationMatchesFormulaEditor() {
+        try { return this.win && this.win.location && this.win.location.href.includes('/e?'); }
+        catch { return false; }
+    }
+
+    // Returns true when the current URL looks like the Flow Builder app
+    locationMatchesFlowEditor() {
+        try {
+            const href = this.win && this.win.location ? this.win.location.href : '';
+            return href.includes('/builder_platform_interaction/flowBuilder.app');
+        } catch { return false; }
     }
 
     //
