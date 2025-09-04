@@ -3,6 +3,10 @@ const TOOLING_API_VERSION = 'v57.0';
 
 // TODO:  add formula step results on each node of the Mermaid diagram
 // TODO:  handle formulas in flow context (different URL)
+// https://.../builder_platform_interaction/flowBuilder.app?flowId=301...
+// div.formulaBuilder.slds-form-element
+// or div.container slds-rich-text-editor slds-grid slds-grid_vertical slds-nowrap
+// TODO: Change openMermaidDiagram() to check whether there are results and use them if available.
 
 var host, sessionId;
 
@@ -1220,10 +1224,54 @@ class FormulaUI {
 
     // Converts an AST to a Mermaid diagram and logs it for easy copy/paste
     // Example usage: FormulaUI.toMermaid(ast) -> logs a ```mermaid fenced block
-    static toMermaid(ast, { fenced = true } = {}) {
+    static toMermaid(ast, { fenced = true, results = null } = {}) {
         const lines = ['graph LR'];
         let counter = 0;
         const newId = () => `n${++counter}`;
+        // Prepare lookup helpers for optional results
+        let resultsByExpr = null;
+        let resultsIsMapLike = false;
+        if (results) {
+            if (Array.isArray(results)) {
+                resultsByExpr = new Map();
+                for (const item of results) {
+                    if (!item) continue;
+                    if (Array.isArray(item) && item.length >= 2) {
+                        resultsByExpr.set(String(item[0]), item[1]);
+                    } else if (item.expression !== undefined) {
+                        resultsByExpr.set(String(item.expression), item.result ?? item.value);
+                    }
+                }
+            } else if (results instanceof Map) {
+                resultsIsMapLike = true;
+            } else if (typeof results === 'object') {
+                resultsByExpr = new Map(Object.entries(results));
+            }
+        }
+        const formatResult = (v) => {
+            if (v === undefined) return undefined;
+            if (v === null) return 'null';
+            try {
+                if (FormulaEngine && typeof FormulaEngine.isDate === 'function' && FormulaEngine.isDate(v)) {
+                    return v.toISOString();
+                }
+            } catch (_) { /* ignore */ }
+            if (typeof v === 'number' && v % 1 !== 0) return v.toFixed(6);
+            return String(v);
+        };
+        const lookupResult = (node) => {
+            if (!results) return undefined;
+            const expr = FormulaEngine.rebuild(node);
+            let v;
+            if (resultsIsMapLike && typeof results.get === 'function') {
+                v = results.get(node);
+                if (v === undefined) v = results.get(expr);
+            }
+            if (v === undefined && resultsByExpr) {
+                v = (typeof resultsByExpr.get === 'function') ? resultsByExpr.get(expr) : resultsByExpr[expr];
+            }
+            return v;
+        };
         const esc = (s) => String(s)
             .replace(/\\/g, '\\\\')
             .replace(/"/g, '\'')
@@ -1233,11 +1281,13 @@ class FormulaUI {
             switch (node.type) {
                 case 'Function': {
                     const expr = FormulaEngine.rebuild(node);
-                    return `${expr}`;
+                    const rv = formatResult(lookupResult(node));
+                    return rv !== undefined ? `${expr} = ${rv}` : `${expr}`;
                 }
                 case 'Operator': {
                     const expr = FormulaEngine.rebuild(node);
-                    return `${expr}`;
+                    const rv = formatResult(lookupResult(node));
+                    return rv !== undefined ? `${expr} = ${rv}` : `${expr}`;
                 }
                 case 'Field':
                     return `${node.name}`;
@@ -1434,15 +1484,24 @@ class FormulaUI {
 
         try {
             const variables = this.getVariableValues(ast, doc);
-            const result = FormulaEngine.calculate(ast, variables);
+            const useApex = !!(doc.getElementById('use-apex-steps') && doc.getElementById('use-apex-steps').checked);
 
-            const displayResult = result === null ? 'null' :
-                                 FormulaEngine.isDate(result) ? result.toLocaleString() :
-                                 typeof result === 'number' && result % 1 !== 0 ? result.toFixed(6) : result;
-            resultDiv.innerHTML = `<strong>Result:</strong> ${displayResult}`;
-            resultDiv.style.display = 'block';
-            resultDiv.style.background = '#e8f5e8';
-            resultDiv.style.borderColor = '#4caf50';
+            if (!useApex) {
+                const result = FormulaEngine.calculate(ast, variables);
+                const displayResult = result === null ? 'null' :
+                                     FormulaEngine.isDate(result) ? result.toLocaleString() :
+                                     typeof result === 'number' && result % 1 !== 0 ? result.toFixed(6) : result;
+                resultDiv.innerHTML = `<strong>Result:</strong> ${displayResult}`;
+                resultDiv.style.display = 'block';
+                resultDiv.style.background = '#e8f5e8';
+                resultDiv.style.borderColor = '#4caf50';
+            } else {
+                // Defer to Apex-driven mechanism in updateStepsWithCalculation
+                resultDiv.innerHTML = `<strong>Result:</strong> Computing via Apex…`;
+                resultDiv.style.display = 'block';
+                resultDiv.style.background = '#fff8e1';
+                resultDiv.style.borderColor = '#ffa000';
+            }
 
             await this.updateStepsWithCalculation(ast, variables, doc);
 
@@ -1469,6 +1528,10 @@ class FormulaUI {
             runId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
         }
 
+        // Prepare to capture the last step value to reflect as main result
+        const resultDiv = doc.getElementById('calculationResult');
+        let lastResultComputed;
+
         for (const [index, step] of steps.entries()) {
             const stepDiv = doc.createElement('div');
             stepDiv.style.cssText = 'margin: 5px 0; padding: 8px; background: #f9f9f9; border-left: 3px solid #007cba;';
@@ -1491,6 +1554,7 @@ class FormulaUI {
                                      FormulaEngine.isDate(result) ? result.toLocaleString() :
                                      typeof result === 'number' && result % 1 !== 0 ? result.toFixed(6) : result;
                 resultSpan.textContent = `= ${displayResult}`;
+                lastResultComputed = displayResult;
             } else {
                 const idx = index + 1;
                 resultSpan.id = `step-result-${runId}-${idx}`;
@@ -1507,13 +1571,34 @@ class FormulaUI {
                 const anonymousApex = this.buildAnonymousApexForSteps(steps, ast, doc, runId);
                 try {
                     const handler = new ToolingAPIHandler(host, sessionId, TOOLING_API_VERSION);
-                    return await handler.executeAnonymous(anonymousApex, runId, doc);
+                    const ok = await handler.executeAnonymous(anonymousApex, runId, doc);
+                    // If results displayed, use the last step's value as main result
+                    if (ok && resultDiv) {
+                        const lastIdx = steps.length;
+                        const lastEl = doc.getElementById(`step-result-${runId}-${lastIdx}`);
+                        if (lastEl && lastEl.textContent) {
+                            const val = String(lastEl.textContent).replace(/^=\s*/, '');
+                            resultDiv.innerHTML = `<strong>Result:</strong> ${val}`;
+                            resultDiv.style.display = 'block';
+                            resultDiv.style.background = '#a7ffaaff';
+                            resultDiv.style.borderColor = '#4caf50';
+                        }
+                    }
+                    return ok;
                 } catch (err) {
                     console.error("ToolingAPIHandler error:", err);
                     return null;
                 }
             } catch (e) {
                 console.error('Failed to run batched Apex for steps:', e);
+            }
+        } else {
+            // Local calculation path: reflect last step as main result
+            if (resultDiv && lastResultComputed !== undefined) {
+                resultDiv.innerHTML = `<strong>Result:</strong> ${lastResultComputed}`;
+                resultDiv.style.display = 'block';
+                resultDiv.style.background = '#a7ffaaff';
+                resultDiv.style.borderColor = '#4caf50';
             }
         }
     }
